@@ -1,0 +1,177 @@
+# coding=utf-8
+
+from xml.dom import minidom as _minidom
+
+import Selector
+from Logger import logInfo
+from Codec import _u2
+
+class ActionError(Exception):
+    pass
+
+def _etToMinidomNodes(etElements, ownerDoc):
+    out = []
+    for el in etElements:
+        xml = _u2.tostring(el)
+        if xml.startswith('<?xml'):
+            xml = xml.split('?>', 1)[1]
+        parsed = _minidom.parseString(xml)
+        imported = ownerDoc.importNode(parsed.documentElement, True)
+        parsed.unlink()
+        out.append(imported)
+    return out
+
+def _resolveInsertionPoint(root, into, before, after):
+    if into:
+        parent = Selector.findFirst(root, into)
+        if parent is None:
+            raise ActionError('into= selector matched nothing: %s' % into)
+        if before:
+            anchor = Selector.findFirst(parent, before)
+            if anchor is None:
+                raise ActionError(
+                    "before= selector matched nothing inside into= scope: %s"
+                    % before)
+            return parent, anchor
+        if after:
+            anchor = Selector.findFirst(parent, after)
+            if anchor is None:
+                raise ActionError(
+                    "after= selector matched nothing inside into= scope: %s"
+                    % after)
+            return parent, _nextElementSibling(anchor)
+        return parent, None
+    if before:
+        anchor = Selector.findFirst(root, before)
+        if anchor is None:
+            raise ActionError('before= selector matched nothing: %s' % before)
+        return anchor.parentNode, anchor
+    if after:
+        anchor = Selector.findFirst(root, after)
+        if anchor is None:
+            raise ActionError('after= selector matched nothing: %s' % after)
+        return anchor.parentNode, _nextElementSibling(anchor)
+    raise ActionError('no insertion target specified')
+
+def _nextElementSibling(node):
+    return node.nextSibling
+
+def _canonical(node):
+    attrs = ''
+    if node.attributes:
+        pairs = sorted((k, node.getAttribute(k))
+                       for k in node.attributes.keys())
+        attrs = ','.join('%s=%s' % pair for pair in pairs)
+    text = ''.join(c.data for c in node.childNodes
+                   if c.nodeType == c.TEXT_NODE).strip()
+    kids = ''.join(_canonical(c) for c in node.childNodes
+                   if c.nodeType == c.ELEMENT_NODE)
+    return '<%s|%s|%s|%s>' % (node.tagName, attrs, text, kids)
+
+def _childKeys(parent):
+    return set(_canonical(c) for c in parent.childNodes
+               if c.nodeType == c.ELEMENT_NODE)
+
+def _insertDeduped(parent, nodes, anchor, label):
+    present = _childKeys(parent)
+    inserted = 0
+    for node in nodes:
+        if _canonical(node) in present:
+            logInfo('%s: <%s> is already present in <%s>; skipped'
+                    % (label, node.tagName, parent.tagName))
+            continue
+        parent.insertBefore(node, anchor)
+        inserted += 1
+    return inserted
+
+def evaluateGuards(root, guards):
+    for g in guards:
+        if g.kind == 'ifExists':
+            if not Selector.exists(root, g.expr):
+                return False
+        elif g.kind == 'ifNotExists':
+            if Selector.exists(root, g.expr):
+                return False
+    return True
+
+def applyInsert(doc, action, label):
+    root = doc.documentElement
+    parent, anchor = _resolveInsertionPoint(root, action.into,
+                                            action.before, action.after)
+    nodes = _etToMinidomNodes(action.payload, doc)
+    return _insertDeduped(parent, nodes, anchor, label)
+
+def applyRemove(doc, action, label):
+    root = doc.documentElement
+    matches = Selector.findAll(root, action.select)
+    if not matches:
+        raise ActionError('remove select matched nothing: %s' % action.select)
+    for node in matches:
+        node.parentNode.removeChild(node)
+    return len(matches)
+
+def applyReplace(doc, action, label):
+    root = doc.documentElement
+    matches = Selector.findAll(root, action.select)
+    if not matches:
+        raise ActionError('replace select matched nothing: %s' % action.select)
+    replacementNodes = _etToMinidomNodes(action.payload, doc)
+    for target in matches:
+        parent = target.parentNode
+        anchor = target.nextSibling
+        parent.removeChild(target)
+        for rep in replacementNodes:
+            clone = rep.cloneNode(True)
+            parent.insertBefore(clone, anchor)
+    return len(matches)
+
+def applyRename(doc, action, label):
+    root = doc.documentElement
+    matches = Selector.findAll(root, action.select)
+    if not matches:
+        raise ActionError('rename select matched nothing: %s' % action.select)
+    for node in matches:
+        if not node.hasAttribute(action.attribute):
+            raise ActionError(
+                "rename: <%s> has no attribute '%s'"
+                % (node.tagName, action.attribute))
+        current = node.getAttribute(action.attribute)
+        if action.fromValue is None:
+            node.setAttribute(action.attribute, action.toValue)
+        else:
+            if action.fromValue not in current:
+                continue
+            node.setAttribute(action.attribute,
+                              current.replace(action.fromValue, action.toValue))
+    return len(matches)
+
+def applyCopy(doc, action, label):
+    root = doc.documentElement
+    sources = Selector.findAll(root, action.select)
+    if not sources:
+        raise ActionError('copy select matched nothing: %s' % action.select)
+    parent, anchor = _resolveInsertionPoint(root, action.into,
+                                            action.before, action.after)
+
+    count = 0
+    for src in sources:
+        clone = src.cloneNode(True)
+        for attr, value in action.overrides:
+            clone.setAttribute(attr, value)
+        parent.insertBefore(clone, anchor)
+        count += 1
+    return count
+
+_DISPATCH = {
+    'insert': applyInsert,
+    'remove': applyRemove,
+    'replace': applyReplace,
+    'rename': applyRename,
+    'copy': applyCopy,
+}
+
+def applyAction(doc, action, label=''):
+    fn = _DISPATCH.get(action.kind)
+    if fn is None:
+        raise ActionError('unknown action kind: %s' % action.kind)
+    return fn(doc, action, label)

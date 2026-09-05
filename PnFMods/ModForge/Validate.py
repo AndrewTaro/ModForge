@@ -1,0 +1,379 @@
+# coding=utf-8
+
+from xml.dom import minidom as _minidom
+
+import Paths
+import Resources
+from Logger import logInfo
+from Codec import _u1
+
+BUILTIN_ELEMENT_CLASSES = (
+    'lesta.unbound2.UbElement',
+    'lesta.libs.unbound.UnboundElement',
+)
+
+_SWF_MAGIC = ('FWS', 'CWS', 'ZWS')
+
+def validateContent(relPath, data):
+    lower = relPath.lower()
+    if lower.endswith('.xml'):
+        return _validateXml(data)
+    if lower.endswith('.unbound'):
+        return _validateUnbound(data)
+    if lower.endswith('.swf'):
+        return _validateSwf(data)
+    return []
+
+def _validateXml(data):
+    if not data.strip():
+        return ['file is empty']
+    try:
+        doc = _minidom.parseString(data)
+    except Exception as exc:
+        return ['not well-formed XML: %s' % exc]
+    doc.unlink()
+    return []
+
+def _validateUnbound(data):
+    depth = 0
+    line = 1
+    inString = False
+    inComment = False
+    i = 0
+    n = len(data)
+    while i < n:
+        ch = data[i]
+        if ch == '\n':
+            line += 1
+            inComment = False
+            i += 1
+            continue
+        if inComment:
+            i += 1
+            continue
+        if inString:
+            if ch == '\\':
+                i += 2
+                continue
+            if ch == '"':
+                inString = False
+            i += 1
+            continue
+        if ch == '"':
+            inString = True
+        elif ch == ';':
+            inComment = True
+        elif ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+            if depth < 0:
+                return ['unbalanced ) at line %d' % line]
+        i += 1
+    if inString:
+        return ['unterminated string literal']
+    if depth:
+        return ['%d unclosed ( at end of file' % depth]
+    return []
+
+def _validateSwf(data):
+    if len(data) < 8:
+        return ['too short to be a SWF (%d bytes)' % len(data)]
+    magic = data[:3]
+    if magic not in _SWF_MAGIC:
+        return ['not a SWF: header is %r, expected one of %s'
+                % (magic, '/'.join(_SWF_MAGIC))]
+    declared = (ord(data[4]) | (ord(data[5]) << 8)
+                | (ord(data[6]) << 16) | (ord(data[7]) << 24))
+    if magic == 'FWS' and declared != len(data):
+        return ['truncated SWF: header declares %d bytes, file has %d'
+                % (declared, len(data))]
+    return []
+
+def validateAssembled(relPath, doc, resolveRef=None):
+    name = relPath.rsplit('/', 1)[-1]
+    if name == 'uss_settings.xml':
+        return _validateUssSettings(doc, resolveRef)
+    if name == 'battle_elements.xml':
+        return _validateBattleElements(doc, resolveRef)
+    return []
+
+def _text(node):
+    parts = [c.data for c in node.childNodes if c.nodeType == 3]
+    return ''.join(parts).strip()
+
+def _children(parent, tag):
+    return [c for c in parent.childNodes
+            if c.nodeType == 1 and c.tagName == tag]
+
+def _validateUssSettings(doc, resolveRef):
+    problems = []
+    root = doc.documentElement
+    for container in _children(root, 'mods'):
+        for tag in ('xmlfile', 'swffile'):
+            for node in _children(container, tag):
+                path = _text(node)
+                if not path:
+                    problems.append('<%s> with no path' % tag)
+                    continue
+                if resolveRef is None:
+                    continue
+                rel = resolveRef(path)
+                if rel is None:
+                    problems.append('<%s>%s</%s> does not resolve to a file'
+                                    % (tag, path, tag))
+                    continue
+                problems.extend('%s: %s' % (path, p)
+                                for p in _contentOf(rel))
+    return problems
+
+def _contentOf(relPath):
+    absPath = Paths.resModsDir() + relPath
+    if not Paths.fileExists(absPath):
+        return []
+    try:
+        data = Paths.readBytes(absPath)
+    except Exception as exc:
+        return ['unreadable: %s' % exc]
+    return validateContent(relPath, data)
+
+def _validateBattleElements(doc, resolveRef):
+    problems = []
+    root = doc.documentElement
+    elementNames = set()
+    duplicates = []
+
+    for container in _children(root, 'elementList'):
+        for el in _children(container, 'element'):
+            name = el.getAttribute('name')
+            if name:
+                if name in elementNames:
+                    duplicates.append(name)
+                elementNames.add(name)
+            problems.extend(_validateElementRow(el, name, resolveRef))
+
+    for name in duplicates:
+        problems.append("two elements claim name='%s'; the later one wins "
+                        "and the earlier mod is silently inert" % name)
+
+    for container in _children(root, 'controllers'):
+        for ctrl in _children(container, 'controller'):
+            clips = ctrl.getAttribute('clips')
+            if not clips:
+                continue
+            for clip in [c.strip() for c in clips.split(',') if c.strip()]:
+                if clip not in elementNames:
+                    problems.append(
+                        "controller clips='%s' names no <element name=>; "
+                        "the controller will be dropped" % clip)
+    return problems
+
+def _validateElementRow(el, name, resolveRef):
+    problems = []
+    label = name or '(unnamed)'
+    cls = el.getAttribute('class')
+    urls = [u.strip() for u in (el.getAttribute('url') or '').split(',')
+            if u.strip()]
+
+    resolvedUrls = []
+    for url in urls:
+        rel = resolveRef(url) if resolveRef is not None else None
+        if resolveRef is not None and rel is None:
+            problems.append("element '%s' url='%s' does not resolve to a file"
+                            % (label, url))
+            continue
+        if rel is not None:
+            resolvedUrls.append(rel)
+            problems.extend("element '%s' url='%s': %s" % (label, url, p)
+                            for p in _contentOf(rel))
+
+    if cls and cls not in BUILTIN_ELEMENT_CLASSES:
+        if not urls:
+            problems.append(
+                "element '%s' class='%s' is not built in and the row names "
+                "no url= to supply it" % (label, cls))
+        elif resolveRef is not None and not resolvedUrls:
+            problems.append(
+                "element '%s' class='%s' needs a SWF but none of its url= "
+                "entries resolve" % (label, cls))
+    return problems
+
+_UNBOUND2_REL = 'gui/unbound2'
+_NAME_CACHE_FILE = 'unbound2Names.txt'
+
+def unbound2ElementNames():
+    modNames = _modElementNames()
+    vanillaNames = _vanillaElementNames()
+    if modNames is None and vanillaNames is None:
+        return None
+    return (modNames or set()) | (vanillaNames or set())
+
+def _modElementNames():
+    root = Paths.resModsDir() + _UNBOUND2_REL + '/'
+    if not Paths.dirExists(root):
+        return None
+    names = set()
+    for path in _walkFiles(root, '.unbound'):
+        try:
+            data = Paths.readBytes(path)
+        except Exception:
+            continue
+        names.update(_defElementNames(data))
+    return names
+
+def _vanillaElementNames():
+    buildId = Paths.gameBuildId()
+    cached = _readNameCache(buildId)
+    if cached is not None:
+        return cached
+    try:
+        from PkgMgr import PkgMgr
+        mgr = PkgMgr(_UNBOUND2_REL.split('/', 1)[0])
+        paths = mgr.listFiles(_UNBOUND2_REL, '.unbound')
+        names = set()
+        for path in paths:
+            data = mgr.getFileContents(path)
+            if data:
+                names.update(_defElementNames(data))
+        mgr.clear()
+    except Exception as exc:
+        logInfo('could not read vanilla unbound2 names: %s' % exc)
+        return None
+    if not paths:
+        return None
+    _writeNameCache(buildId, names)
+    return names
+
+def _readNameCache(buildId):
+    path = Paths.cacheDir() + _NAME_CACHE_FILE
+    if not Paths.fileExists(path):
+        return None
+    try:
+        lines = Paths.readBytes(path).split('\n')
+    except Exception:
+        return None
+    if not lines or lines[0].strip() != buildId:
+        return None
+    return set(n for n in (line.strip() for line in lines[1:]) if n)
+
+def _writeNameCache(buildId, names):
+    try:
+        Paths.writeBytes(Paths.cacheDir() + _NAME_CACHE_FILE,
+                         '\n'.join([buildId] + sorted(names)))
+    except Exception as exc:
+        logInfo('could not cache vanilla unbound2 names: %s' % exc)
+
+def _walkFiles(root, suffix):
+    out = []
+    for dirPath, _dirs, files in _u1.walk(root):
+        base = dirPath.replace('\\', '/').rstrip('/') + '/'
+        for name in files:
+            if name.endswith(suffix):
+                out.append(base + name)
+    return out
+
+def _defElementNames(data):
+    out = []
+    idx = 0
+    needle = '(def element'
+    while True:
+        idx = data.find(needle, idx)
+        if idx < 0:
+            return out
+        idx += len(needle)
+        end = idx
+        while end < len(data) and data[end] in ' \t\r\n':
+            end += 1
+        start = end
+        while end < len(data) and data[end] not in ' \t\r\n()':
+            end += 1
+        if end > start:
+            out.append(data[start:end])
+
+def validateElementNames(doc, knownNames):
+    if knownNames is None:
+        return []
+    problems = []
+    root = doc.documentElement
+    for container in _children(root, 'elementList'):
+        for el in _children(container, 'element'):
+            if el.getAttribute('class') != 'lesta.unbound2.UbElement':
+                continue
+            elementName = el.getAttribute('elementName')
+            if elementName and elementName not in knownNames:
+                problems.append(
+                    "element '%s' elementName='%s' matches no "
+                    "(def element ...) under gui/unbound2/"
+                    % (el.getAttribute('name') or '(unnamed)', elementName))
+    return problems
+
+STUB_XML = '<ui/>'
+
+def substituteBrokenRefs(doc, relPath, resolveRef, stubPathFor):
+    if relPath.rsplit('/', 1)[-1] != 'uss_settings.xml':
+        return []
+    swapped = []
+    root = doc.documentElement
+    for container in _children(root, 'mods'):
+        for tag in ('xmlfile', 'swffile'):
+            for node in _children(container, tag):
+                path = _text(node)
+                if not path:
+                    continue
+                why = _brokenReason(path, resolveRef)
+                if why is None:
+                    continue
+                stub = stubPathFor(tag)
+                if stub is None:
+                    container.removeChild(node)
+                    swapped.append((path, 'removed'))
+                    logInfo('removed unusable <%s>%s (%s)' % (tag, path, why))
+                    continue
+                for child in list(node.childNodes):
+                    node.removeChild(child)
+                node.appendChild(doc.createTextNode(stub))
+                swapped.append((path, stub))
+                logInfo('substituted stub for <%s>%s (%s)' % (tag, path, why))
+    return swapped
+
+def _brokenReason(path, resolveRef):
+    rel = resolveRef(path)
+    if rel is None:
+        return 'does not resolve to a file'
+    problems = _contentOf(rel)
+    if problems:
+        return problems[0]
+    return None
+
+_XML_STUB_REL = 'gui/unbound/mods/__forge_stub.xml'
+_SWF_STUB_REL = 'gui/unbound/mods/__forge_stub.swf'
+
+def ensureXmlStub():
+    absPath = Paths.resModsDir() + _XML_STUB_REL
+    try:
+        if not Paths.fileExists(absPath):
+            Paths.writeBytes(absPath, STUB_XML)
+    except Exception as exc:
+        logInfo('could not create xml stub: %s' % exc)
+        return None
+    return '../unbound/mods/__forge_stub.xml'
+
+def ensureSwfStub():
+    absPath = Paths.resModsDir() + _SWF_STUB_REL
+    try:
+        import StubAssets
+        if not Paths.fileExists(absPath):
+            Paths.writeBytes(absPath, StubAssets.STUB_SWF)
+    except Exception as exc:
+        logInfo('could not create swf stub: %s' % exc)
+        return None
+    return '../unbound/mods/__forge_stub.swf'
+
+def removeStubs():
+    for rel in (_XML_STUB_REL, _SWF_STUB_REL):
+        absPath = Paths.resModsDir() + rel
+        try:
+            if Paths.fileExists(absPath):
+                Paths.removeFile(absPath)
+        except Exception as exc:
+            logInfo('could not remove stub %s: %s' % (rel, exc))

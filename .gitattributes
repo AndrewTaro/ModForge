@@ -1,0 +1,4 @@
+# Keep LF in the working tree, not just in the repo. core.autocrlf=true
+# otherwise rewrites a file's endings on every checkout, which silently
+# broke text anchors mid-session when sources were reverted.
+* text=auto eol=lf
