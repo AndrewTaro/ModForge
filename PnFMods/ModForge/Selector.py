@@ -73,6 +73,8 @@ def _splitSteps(expr):
     steps.append(''.join(buf))
     return steps
 
+splitSteps = _splitSteps
+
 def parseSelector(expr):
     if not expr or not expr.strip():
         raise SelectorError('empty selector')

@@ -94,15 +94,13 @@ def evaluateGuards(root, guards):
                 return False
     return True
 
-def applyInsert(doc, action, label):
-    root = doc.documentElement
+def applyInsert(doc, action, label, root, sources):
     parent, anchor = _resolveInsertionPoint(root, action.into,
                                             action.before, action.after)
     nodes = _etToMinidomNodes(action.payload, doc)
     return _insertDeduped(parent, nodes, anchor, label)
 
-def applyRemove(doc, action, label):
-    root = doc.documentElement
+def applyRemove(doc, action, label, root, sources):
     matches = Selector.findAll(root, action.select)
     if not matches:
         raise ActionError('remove select matched nothing: %s' % action.select)
@@ -110,8 +108,7 @@ def applyRemove(doc, action, label):
         node.parentNode.removeChild(node)
     return len(matches)
 
-def applyReplace(doc, action, label):
-    root = doc.documentElement
+def applyReplace(doc, action, label, root, sources):
     matches = Selector.findAll(root, action.select)
     if not matches:
         raise ActionError('replace select matched nothing: %s' % action.select)
@@ -125,39 +122,53 @@ def applyReplace(doc, action, label):
             parent.insertBefore(clone, anchor)
     return len(matches)
 
-def applyRename(doc, action, label):
-    root = doc.documentElement
-    matches = Selector.findAll(root, action.select)
-    if not matches:
-        raise ActionError('rename select matched nothing: %s' % action.select)
+def applySetAttribute(doc, action, label, root, sources):
+    if action.select is None:
+        matches = [root]
+    else:
+        matches = Selector.findAll(root, action.select)
+        if not matches:
+            raise ActionError('setAttribute select matched nothing: %s'
+                              % action.select)
+    changed = 0
     for node in matches:
-        if not node.hasAttribute(action.attribute):
-            raise ActionError(
-                "rename: <%s> has no attribute '%s'"
-                % (node.tagName, action.attribute))
-        current = node.getAttribute(action.attribute)
         if action.fromValue is None:
             node.setAttribute(action.attribute, action.toValue)
-        else:
-            if action.fromValue not in current:
-                continue
-            node.setAttribute(action.attribute,
-                              current.replace(action.fromValue, action.toValue))
-    return len(matches)
+            changed += 1
+            continue
+        if not node.hasAttribute(action.attribute):
+            continue
+        current = node.getAttribute(action.attribute)
+        if action.fromValue not in current:
+            continue
+        node.setAttribute(action.attribute,
+                          current.replace(action.fromValue, action.toValue))
+        changed += 1
+    return changed
 
-def applyCopy(doc, action, label):
-    root = doc.documentElement
-    sources = Selector.findAll(root, action.select)
-    if not sources:
-        raise ActionError('copy select matched nothing: %s' % action.select)
+def applyCopy(doc, action, label, root, sources):
+    if action.source:
+        if sources is None:
+            raise ActionError('copy from= is not available here: %s'
+                              % action.source)
+        found = sources.find(action.source, action.select)
+        if not found:
+            raise ActionError('copy select matched nothing in %s: %s'
+                              % (action.source, action.select))
+    else:
+        found = Selector.findAll(root, action.select)
+        if not found:
+            raise ActionError('copy select matched nothing: %s'
+                              % action.select)
     parent, anchor = _resolveInsertionPoint(root, action.into,
                                             action.before, action.after)
 
     count = 0
-    for src in sources:
-        clone = src.cloneNode(True)
-        for attr, value in action.overrides:
-            clone.setAttribute(attr, value)
+    for src in found:
+        clone = (doc.importNode(src, True) if action.source
+                 else src.cloneNode(True))
+        for nested in action.actions:
+            applyAction(doc, nested, label, clone, sources)
         parent.insertBefore(clone, anchor)
         count += 1
     return count
@@ -166,12 +177,14 @@ _DISPATCH = {
     'insert': applyInsert,
     'remove': applyRemove,
     'replace': applyReplace,
-    'rename': applyRename,
+    'setAttribute': applySetAttribute,
     'copy': applyCopy,
 }
 
-def applyAction(doc, action, label=''):
+def applyAction(doc, action, label='', root=None, sources=None):
     fn = _DISPATCH.get(action.kind)
     if fn is None:
         raise ActionError('unknown action kind: %s' % action.kind)
-    return fn(doc, action, label)
+    if root is None:
+        root = doc.documentElement
+    return fn(doc, action, label, root, sources)

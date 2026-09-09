@@ -99,7 +99,7 @@ def _checkModRequirements(m, byName):
 
 def validateFileReferences(m):
     missing = []
-    for t in m.targets:
+    for t in m.builds:
         for action in t.actions:
             if action.kind not in ('insert', 'replace'):
                 continue

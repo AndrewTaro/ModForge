@@ -38,31 +38,42 @@ def runInstaller(installerVersion):
 
     manifests = discoverManifests()
     stats.discovered = len(manifests)
+    wasCompiled = registry.get('compiled', {})
     if not manifests:
+        _dropOrphanedCompiles(wasCompiled, {})
         Validate.removeStubs()
         return _finalize(registry, [], stats, installerVersion)
+
+    eligible = validateRequirements(manifests, installerVersion)
+    compiled, compileFailed, declared, sources = _runBuilds(eligible,
+                                                            wasCompiled)
+    _dropOrphanedCompiles(wasCompiled, declared)
 
     newHashes = dict((m.modName, m.sourceHash) for m in manifests)
     oldHashes = registry.get('mods', {})
     changed = newHashes != oldHashes
     buildChanged = registry.get('buildId') != Paths.gameBuildId()
-    if not changed and not buildChanged:
+    builtChanged = compiled != wasCompiled
+    if not changed and not buildChanged and not builtChanged:
         logInfo('no manifest changes since last run; nothing to do')
         stats.unchanged = len(manifests)
         return stats
     if not changed and buildChanged:
         logInfo('manifests unchanged but build moved; re-applying')
+    if not changed and not buildChanged and builtChanged:
+        logInfo('manifests unchanged but a compiled payload moved; re-applying')
 
     removedNames = [name for name in oldHashes if name not in newHashes]
     stats.removed = len(removedNames)
     for name in removedNames:
         logInfo("removed '%s' since last run; will revert its changes" % name)
 
-    eligible = validateRequirements(manifests, installerVersion)
+    eligible = [m for m in eligible if m.modName not in compileFailed]
     eligible = [m for m in eligible if validateFileReferences(m)]
     ordered = topoSort(eligible)
     summarizePlan(ordered)
-    stats.skipped = stats.discovered - len(ordered)
+    stats.failed = len(compileFailed)
+    stats.skipped = stats.discovered - len(ordered) - len(compileFailed)
 
     for relPath, why in Guard.detectDrift(registry.get('outputs', {})):
         logError("'%s' changed on disk since our last run (%s); "
@@ -76,7 +87,8 @@ def runInstaller(installerVersion):
 
     for relPath in targetFiles:
         try:
-            updated = _applyToTarget(relPath, ordered, applied, failed)
+            updated = _applyToTarget(relPath, ordered, applied, failed,
+                                     sources)
         except _TargetSkipped as skip:
             logError("target '%s' skipped: %s" % (relPath, skip))
             continue
@@ -114,22 +126,114 @@ def runInstaller(installerVersion):
 
     successful = [m for m in ordered if m.modName not in failed]
     return _finalize(registry, successful, stats, installerVersion,
-                     Guard.outputHashes(staged))
+                     Guard.outputHashes(staged), compiled)
 
 class _TargetSkipped(Exception):
     pass
+
+def _runBuilds(manifests, recorded):
+    import Fragment
+    sources = Fragment.Sources()
+    built = {}
+    failedNames = set()
+    declared = set()
+    for m in manifests:
+        for spec in m.builds:
+            if not spec.root:
+                continue
+            declared.add(spec.file)
+            try:
+                built[spec.file] = _runOneGenerated(m, spec, sources)
+            except Exception as exc:
+                logError("'%s' cannot generate %s: %s"
+                         % (m.modName, spec.file, exc))
+                failedNames.add(m.modName)
+        if m.modName in failedNames:
+            for spec in m.compiles:
+                declared.add(spec.out)
+            continue
+        for spec in m.compiles:
+            declared.add(spec.out)
+            try:
+                built[spec.out] = _runOneCompile(m, spec, recorded)
+            except Exception as exc:
+                logError("'%s' cannot build %s: %s"
+                         % (m.modName, spec.out, exc))
+                failedNames.add(m.modName)
+    return built, failedNames, declared, sources
+
+def _runOneGenerated(m, spec, sources):
+    import Build
+    outPath = Paths.resolveResModsTarget(spec.file)
+    if outPath is None:
+        raise Exception('output path escapes res_mods/: %s' % spec.file)
+    for rel in Build.sourceFiles(spec.actions):
+        if Paths.resolveResModsTarget(rel) is None:
+            raise Exception('source path escapes res_mods/: %s' % rel)
+    data = Build.buildDocument(spec, m.modName, sources)
+    stamp = Paths.hashBytes(data)
+    if Paths.hashFile(outPath) != stamp:
+        Paths.writeBytes(outPath, data)
+        logInfo("'%s' generated %s from %d instruction(s)"
+                % (m.modName, spec.file, len(spec.actions)))
+    return (stamp, m.modName)
+
+def _runOneCompile(m, spec, recorded):
+    outPath = Paths.resolveResModsTarget(spec.out)
+    if outPath is None:
+        raise Exception('output path escapes res_mods/: %s' % spec.out)
+
+    sourcePaths = []
+    for rel in spec.sources:
+        absPath = Paths.resolveResModsTarget(rel)
+        if absPath is None:
+            raise Exception('source path escapes res_mods/: %s' % rel)
+        if not Paths.fileExists(absPath):
+            raise Exception('source not found: %s' % rel)
+        sourcePaths.append(absPath)
+
+    stamp = Paths.hashBytes(''.join(
+        [_COMPILER_STAMP] + [Paths.hashFile(p) for p in sourcePaths]))
+    previous = recorded.get(spec.out)
+    if (previous and previous[0] == stamp and Paths.fileExists(outPath)):
+        return (stamp, m.modName)
+
+    import UssCompile
+    data, count = UssCompile.compileMarkup(sourcePaths)
+    Paths.writeBytes(outPath, str(data))
+    logInfo("'%s' built %s from %d expression(s)"
+            % (m.modName, spec.out, count))
+    return (stamp, m.modName)
+
+def _dropOrphanedCompiles(recorded, declaredPaths):
+    for relPath in sorted(recorded):
+        if relPath in declaredPaths:
+            continue
+        absPath = Paths.resolveResModsTarget(relPath)
+        if absPath is None or not Paths.fileExists(absPath):
+            continue
+        try:
+            Paths.removeFile(absPath)
+        except Exception as exc:
+            logError('cannot remove %s: %s' % (relPath, exc))
+            continue
+        logInfo("removed %s; '%s' no longer builds it"
+                % (relPath, recorded[relPath][1]))
 
 def _collectTargetFiles(orderedManifests):
     seen = []
     seenSet = set()
     for m in orderedManifests:
-        for t in m.targets:
+        for t in m.builds:
+            if t.root:
+                continue
             if t.file not in seenSet:
                 seenSet.add(t.file)
                 seen.append(t.file)
     return seen
 
-def _applyToTarget(relPath, orderedManifests, appliedOut, failedOut):
+def _applyToTarget(relPath, orderedManifests, appliedOut, failedOut,
+                   sources):
     pristine = Resources.loadPristine(relPath)
     if pristine is None:
         raise _TargetSkipped('cannot fetch pristine copy')
@@ -141,7 +245,8 @@ def _applyToTarget(relPath, orderedManifests, appliedOut, failedOut):
 
     mutated = False
     for m in orderedManifests:
-        targets = [t for t in m.targets if t.file == relPath]
+        targets = [t for t in m.builds
+                   if not t.root and t.file == relPath]
         if not targets:
             continue
 
@@ -156,7 +261,7 @@ def _applyToTarget(relPath, orderedManifests, appliedOut, failedOut):
                 for action in tspec.actions:
                     logInfo("'%s': %s on %s"
                             % (m.modName, action.kind, relPath))
-                    if applyAction(doc, action, m.modName):
+                    if applyAction(doc, action, m.modName, None, sources):
                         edited = True
 
             if edited:
@@ -233,13 +338,20 @@ def _loadRegistry():
         h = child.get('hash')
         if path and h:
             outputs[path] = h
+    compiled = {}
+    for child in root.findall('compiled'):
+        path = child.get('path')
+        h = child.get('hash')
+        if path and h:
+            compiled[path] = (h, child.get('mod') or '')
     return {
         'buildId': root.get('buildId'),
         'mods': mods,
         'outputs': outputs,
+        'compiled': compiled,
     }
 
-def _saveRegistry(buildId, successfulManifests, outputHashes):
+def _saveRegistry(buildId, successfulManifests, outputHashes, compiled):
     root = _u2.Element('installed')
     root.set('buildId', buildId)
     root.set('installer', _installerVersion or '')
@@ -253,17 +365,26 @@ def _saveRegistry(buildId, successfulManifests, outputHashes):
         e = _u2.SubElement(root, 'output')
         e.set('path', path)
         e.set('hash', outputHashes[path])
+
+    for path in sorted(compiled or {}):
+        stamp, modName = compiled[path]
+        e = _u2.SubElement(root, 'compiled')
+        e.set('path', path)
+        e.set('hash', stamp)
+        e.set('mod', modName)
     data = _u2.tostring(root)
     Paths.writeBytes(Paths.installedRegistryPath(), data)
 
 _installerVersion = None
+_COMPILER_STAMP = '1'
 
 def _finalize(_oldRegistry, successfulManifests, stats, installerVersion,
-              outputHashes=None):
+              outputHashes=None, compiled=None):
     global _installerVersion
     _installerVersion = installerVersion
     try:
-        _saveRegistry(Paths.gameBuildId(), successfulManifests, outputHashes)
+        _saveRegistry(Paths.gameBuildId(), successfulManifests, outputHashes,
+                      compiled)
     except Exception as exc:
         logError('failed to write installed.xml: %s' % exc)
     Resources.shutdown()
