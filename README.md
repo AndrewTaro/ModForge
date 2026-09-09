@@ -171,6 +171,17 @@ If you ship a precompiled `.xml`/`.swf` pair, put it in `gui/unbound/mods/` and 
 **Selectors**: child steps `a/b/c`, `.` / `..`, `*`, `[@name='x']`, `[text()='x']`, `[1]` /
 `[last()]`. No recursive `//`.
 
+A predicate takes **either quote style**, which matters more than it looks: an Unbound `value=`
+is built out of single-quoted strings, so selecting a `<bind>` by its expression needs the other
+one. Positions are 1-based, and a value containing `]` cannot go in a predicate at all.
+
+```xml
+<setAttribute select="bind[@value=&quot;isEnemy ? '-1' : '1'&quot;]" attribute="value" to="'1'"/>
+```
+
+Prefer a path plus a stable `@name` over a long value or an index where you have the choice —
+both of the latter break on the next patch, an index silently.
+
 **Actions** inside a `<build>`:
 
 | Action | Does |
