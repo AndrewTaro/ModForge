@@ -1,7 +1,8 @@
 # ModForge
 
 A mod installer for World of Warships. It patches the game's own UI files from small XML
-**blueprints**, so several mods can edit the same vanilla file without overwriting each other.
+**blueprints**, so several mods can edit the same vanilla file without overwriting each other,
+and builds a mod's own Unbound 1 payload out of the current build's markup.
 
 Usually bundled inside other mods' packs, not installed on its own. It runs once at game start,
 has no UI, and reverts every file to stock when removed.
@@ -30,13 +31,16 @@ It skips the whole run if no blueprint, mod set, or game build changed since las
   re-fetches originals when the game updates.
 - **Builds Unbound 1 payloads.** Ship the `.xml`; ModForge compiles the `.swf` the client needs,
   so there is no build tool to run and nothing to rebuild by hand when you edit an expression.
-- **Tracks vanilla markup.** Describe your changes to a vanilla UI block instead of copying it,
-  and the copy is re-cut from the current build every launch — no re-diffing after a patch.
+- **Tracks vanilla markup and styles.** Describe your changes to a vanilla `<block>` or `<css>`
+  instead of copying it, and the copy is re-cut from the current build every launch — no
+  re-diffing after a patch.
+- **Handles the boilerplate.** One element registers your payload in `uss_settings.xml`;
+  another mounts an element in battle, both entries it needs.
 
 ## Writing a blueprint
 
 Ship it as `res_mods/PnFMods/<YourMod>/manifest.xml`, or drop it in `res_mods/ForgeBlueprints/`.
-Ship your own assets — ModForge assembles the vanilla files, not your payload.
+Ship your own art and sound; the XML ModForge can build for you.
 
 ```xml
 <mod name="My Mod" version="1.0.0" priority="0">
@@ -119,18 +123,30 @@ that mod is skipped with the reason in `python.log` rather than shipping a stale
 
 ### Showing it in battle
 
-A battle element is two entries — the element and the controller that constructs it — and it does
-nothing without both. `<ubMountInBattle>` writes the pair:
+Registering a payload makes the client load it; it does not put anything on screen in battle.
+`<ubMountInBattle>` writes the `battle_elements.xml` entries that do:
 
 ```xml
-<ubMountInBattle rootElementId="MyModContainer"/>
+<ubMountInBattle unbound="1" rootElementId="MyModContainer"/>
 ```
 
-`rootElementId` is the element your markup defines. `name=` is the instance name the client uses
-internally and defaults to `rootElementId`; `hitTest="false"` opts out of mouse hit-testing, which
-is worth doing for anything purely decorative. `url=` is accepted and passed through, but an
-Unbound 1 element does not need one — vanilla's own two carry no `url` — so leave it out unless
-you know otherwise.
+`rootElementId` is the element your markup defines. `unbound=` says which framework defines it,
+and is **required** — the two are written differently in all three places that matter:
+
+| | `unbound="1"` | `unbound="2"` |
+|---|---|---|
+| class | `lesta.libs.unbound.UnboundElement` | `lesta.unbound2.UbElement` |
+| root id | inside `<properties>` | `elementName=` on the element |
+| controller | written — without it the element is listed and never constructed | none |
+
+There is no default and no guess. ModForge cannot tell the two apart from the id: an Unbound 1
+root is a `<block>` in your own payload, which for a `<ubBuild>` mod does not exist yet when the
+macro expands. Naming the wrong one produces a well-formed entry that simply never renders.
+
+`name=` is the instance name the client uses internally and defaults to `rootElementId`;
+`hitTest="false"` opts out of mouse hit-testing, worth doing for anything purely decorative.
+`url=` is accepted and passed through, but an Unbound element does not need one — vanilla's own
+Unbound 1 entries carry none — so leave it out unless you know otherwise.
 
 ### Registering a payload you already built
 

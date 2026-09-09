@@ -12,6 +12,7 @@ BATTLE_ELEMENTS = 'gui/battle_elements.xml'
 PAYLOAD_DIR = 'gui/unbound/mods/'
 USS_PAYLOAD_DIR = '../unbound/mods/'
 UNBOUND_ELEMENT_CLASS = 'lesta.libs.unbound.UnboundElement'
+UNBOUND2_ELEMENT_CLASS = 'lesta.unbound2.UbElement'
 UNBOUND_CONTROLLER_CLASS = ('lesta.dialogs.battle_window_controllers'
                             '.UnboundElementController')
 
@@ -103,7 +104,8 @@ _KNOWN_COMPILE_ATTRS = set(['out', 'source'])
 _KNOWN_SOURCE_ATTRS = set(['file'])
 _KNOWN_UB_BUILD_ATTRS = set(['name', 'autoCompile'])
 _KNOWN_UB_REGISTER_ATTRS = set(['name', 'swf'])
-_KNOWN_UB_MOUNT_ATTRS = set(['rootElementId', 'name', 'hitTest', 'url'])
+_KNOWN_UB_MOUNT_ATTRS = set(['unbound', 'rootElementId', 'name', 'hitTest',
+                             'url'])
 
 def parseManifest(filePath, fileBytes):
     try:
@@ -356,6 +358,14 @@ def _ussRegistration(name, withSwf):
 def _parseUbMountInBattle(m, node):
     _warnUnknown(node, _KNOWN_UB_MOUNT_ATTRS, 'ubMountInBattle attribute',
                  m.modName)
+    unbound = node.get('unbound')
+    if unbound is None:
+        raise ManifestError("%s: <ubMountInBattle> requires unbound='1' or "
+                            "unbound='2'" % m.modName)
+    unbound = unbound.strip()
+    if unbound not in ('1', '2'):
+        raise ManifestError("%s: <ubMountInBattle unbound='%s'> must be '1' or "
+                            "'2'" % (m.modName, unbound))
     rootElementId = node.get('rootElementId')
     if not rootElementId:
         raise ManifestError('%s: <ubMountInBattle> requires `rootElementId`'
@@ -368,23 +378,27 @@ def _parseUbMountInBattle(m, node):
 
     element = _u2.Element('element')
     element.set('name', name)
-    element.set('class', UNBOUND_ELEMENT_CLASS)
     url = node.get('url')
     if url:
         element.set('url', url.strip())
     props = _u2.SubElement(element, 'properties')
-    props.set('rootElementId', rootElementId)
     props.set('hitTest', 'true' if _boolAttr(node.get('hitTest'), True)
               else 'false')
 
-    controller = _u2.Element('controller')
-    controller.set('class', UNBOUND_CONTROLLER_CLASS)
-    controller.set('clips', name)
-
     b = BuildSpec()
     b.file = BATTLE_ELEMENTS
+    if unbound == '1':
+        element.set('class', UNBOUND_ELEMENT_CLASS)
+        props.set('rootElementId', rootElementId)
+    else:
+        element.set('class', UNBOUND2_ELEMENT_CLASS)
+        element.set('elementName', rootElementId)
     b.actions.append(_insertInto('elementList', element))
-    b.actions.append(_insertInto('controllers', controller))
+    if unbound == '1':
+        controller = _u2.Element('controller')
+        controller.set('class', UNBOUND_CONTROLLER_CLASS)
+        controller.set('clips', name)
+        b.actions.append(_insertInto('controllers', controller))
     return b
 
 def _insertInto(container, payloadElement):
