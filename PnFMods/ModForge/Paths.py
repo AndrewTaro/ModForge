@@ -120,6 +120,12 @@ _FNV_PRIME = 0x100000001b3
 _FNV_MASK = (1 << 64) - 1
 
 def hashBytes(data):
+    # unicode would hash code points where the same content read back off disk
+    # hashes utf-8 bytes -- the two silently disagree above ASCII. Encode at
+    # the producer (Build.serialize, Installer._serialize), never here.
+    if isinstance(data, unicode):
+        raise Exception('hashBytes needs bytes, got unicode: %r'
+                        % (data[:40],))
     h = _FNV_OFFSET
     for ch in data:
         h ^= ord(ch)
@@ -130,3 +136,12 @@ def hashFile(path):
     if not fileExists(path):
         return None
     return hashBytes(readBytes(path))
+
+def statOf(path):
+    """(size, mtime) as strings, or None. Cheap enough to call per run; the
+    hash stays the authority, this only ever proves a file is UNCHANGED."""
+    try:
+        st = _u1.stat(path)
+    except Exception:
+        return None
+    return (str(st.st_size), '%.6f' % st.st_mtime)

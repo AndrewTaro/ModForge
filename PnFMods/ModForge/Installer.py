@@ -1,5 +1,7 @@
 # coding=utf-8
 
+import time
+
 from xml.dom import minidom as _minidom
 
 from Codec import _u2
@@ -39,25 +41,54 @@ def runInstaller(installerVersion):
     manifests = discoverManifests()
     stats.discovered = len(manifests)
     wasCompiled = registry.get('compiled', {})
+    recordedStamps = registry.get('stamps', {})
+    recordedOutputs = registry.get('outputs', {})
     if not manifests:
         _dropOrphanedCompiles(wasCompiled, {})
+        tx = Transaction()
+        _revertOrphanedOutputs(recordedOutputs, set(), tx)
+        try:
+            tx.commit()
+        except Exception as exc:
+            logError('transaction commit failed: %s' % exc)
         Validate.removeStubs()
         return _finalize(registry, [], stats, installerVersion)
-
-    eligible = validateRequirements(manifests, installerVersion)
-    compiled, compileFailed, declared, sources = _runBuilds(eligible,
-                                                            wasCompiled)
-    _dropOrphanedCompiles(wasCompiled, declared)
 
     newHashes = dict((m.modName, m.sourceHash) for m in manifests)
     oldHashes = registry.get('mods', {})
     changed = newHashes != oldHashes
     buildChanged = registry.get('buildId') != Paths.gameBuildId()
+
+    eligible = validateRequirements(manifests, installerVersion)
+    # Payloads commit first: reference validation and the compiler both read
+    # them off disk. revertCommitted below undoes them if the registration
+    # that names them never lands -- an XML registered against a SWF missing
+    # its keys is a client that refuses to boot.
+    payloadTx = Transaction()
+    compiled, compileFailed, declared, sources = _runBuilds(eligible,
+                                                            wasCompiled,
+                                                            recordedStamps,
+                                                            payloadTx)
+    try:
+        payloadTx.commit()
+    except Exception as exc:
+        logError('payload commit failed: %s' % exc)
+        Resources.shutdown()
+        return stats
+    _dropOrphanedCompiles(wasCompiled, declared)
+
     builtChanged = compiled != wasCompiled
-    if not changed and not buildChanged and not builtChanged:
+    # Before the early return, not after: an output clobbered by another
+    # installer is exactly the case where nothing else has changed, and the
+    # rebuild below is what repairs it.
+    drift = Guard.detectDrift(recordedOutputs, recordedStamps)
+    _reportDrift(drift)
+    if not changed and not buildChanged and not builtChanged and not drift:
         logInfo('no manifest changes since last run; nothing to do')
         stats.unchanged = len(manifests)
         return stats
+    if not changed and not buildChanged and not builtChanged and drift:
+        logInfo('manifests unchanged but an output drifted; re-applying')
     if not changed and buildChanged:
         logInfo('manifests unchanged but build moved; re-applying')
     if not changed and not buildChanged and builtChanged:
@@ -75,12 +106,9 @@ def runInstaller(installerVersion):
     stats.failed = len(compileFailed)
     stats.skipped = stats.discovered - len(ordered) - len(compileFailed)
 
-    for relPath, why in Guard.detectDrift(registry.get('outputs', {})):
-        logError("'%s' changed on disk since our last run (%s); "
-                 "rebuilding it from pristine" % (relPath, why))
-
     targetFiles = _collectTargetFiles(ordered)
     tx = Transaction()
+    _revertOrphanedOutputs(recordedOutputs, set(targetFiles), tx)
     applied = set()
     failed = set()
     staged = []
@@ -120,7 +148,7 @@ def runInstaller(installerVersion):
         tx.commit()
     except Exception as exc:
         logError('transaction commit failed: %s' % exc)
-
+        payloadTx.revertCommitted()
         Resources.shutdown()
         return stats
 
@@ -131,19 +159,49 @@ def runInstaller(installerVersion):
 class _TargetSkipped(Exception):
     pass
 
-def _runBuilds(manifests, recorded):
+def _reportDrift(drift):
+    """ModForge owns its targets and rebuilds them from pristine, so a foreign
+    edit is about to be discarded. Keep a copy first: the likeliest author of
+    one is the mod author, hand-editing during development."""
+    for relPath, why in drift:
+        logError("'%s' changed on disk since our last run (%s); rebuilding it "
+                 "from pristine. To keep an edit to this file, declare it in a "
+                 "blueprint -- ModForge rewrites it on every run."
+                 % (relPath, why))
+        absPath = Paths.resolveResModsTarget(relPath)
+        if absPath is not None and Paths.fileExists(absPath):
+            saved = _backupDrifted(relPath, absPath)
+            if saved:
+                logInfo('kept the drifted copy at %s' % saved)
+
+def _backupDrifted(relPath, absPath):
+    stamp = '%d' % int(time.time())
+    dest = Paths.cacheDir() + 'drift_backups/' + stamp + '/' + relPath
+    try:
+        Paths.writeBytes(dest, Paths.readBytes(absPath))
+    except Exception as exc:
+        logError('cannot back up %s: %s' % (relPath, exc))
+        return None
+    return dest
+
+def _runBuilds(manifests, recorded, stamps, tx):
     import Fragment
     sources = Fragment.Sources()
     built = {}
     failedNames = set()
     declared = set()
+    # absPath -> staged bytes, so a compile can read a payload generated in
+    # this same run, before any of it has reached disk.
+    pending = {}
     for m in manifests:
         for spec in m.builds:
             if not spec.root:
                 continue
             declared.add(spec.file)
             try:
-                built[spec.file] = _runOneGenerated(m, spec, sources)
+                built[spec.file] = _runOneGenerated(m, spec, sources,
+                                                    recorded, stamps, tx,
+                                                    pending)
             except Exception as exc:
                 logError("'%s' cannot generate %s: %s"
                          % (m.modName, spec.file, exc))
@@ -155,14 +213,15 @@ def _runBuilds(manifests, recorded):
         for spec in m.compiles:
             declared.add(spec.out)
             try:
-                built[spec.out] = _runOneCompile(m, spec, recorded)
+                built[spec.out] = _runOneCompile(m, spec, recorded, tx,
+                                                 pending)
             except Exception as exc:
                 logError("'%s' cannot build %s: %s"
                          % (m.modName, spec.out, exc))
                 failedNames.add(m.modName)
     return built, failedNames, declared, sources
 
-def _runOneGenerated(m, spec, sources):
+def _runOneGenerated(m, spec, sources, recorded, stamps, tx, pending):
     import Build
     outPath = Paths.resolveResModsTarget(spec.file)
     if outPath is None:
@@ -170,15 +229,28 @@ def _runOneGenerated(m, spec, sources):
     for rel in Build.sourceFiles(spec.actions):
         if Paths.resolveResModsTarget(rel) is None:
             raise Exception('source path escapes res_mods/: %s' % rel)
+
     data = Build.buildDocument(spec, m.modName, sources)
     stamp = Paths.hashBytes(data)
+
+    # Skips re-reading and re-hashing the output; does NOT skip the rebuild.
+    # A vanilla source can change without the build id moving (that is what
+    # test_a_changed_vanilla_block_regenerates_and_recompiles pins), so the
+    # document has to be built to know whether it still matches.
+    pending[outPath] = data
+    previous = recorded.get(spec.file)
+    if (previous and previous[0] == stamp and Guard.stampHolds(spec.file, stamps)):
+        return (stamp, m.modName)
+
+    # Staged only when it actually differs: rewriting an identical file moves
+    # its mtime and costs the stat gate its fast path on the next run.
     if Paths.hashFile(outPath) != stamp:
-        Paths.writeBytes(outPath, data)
+        tx.stage(outPath, data)
         logInfo("'%s' generated %s from %d instruction(s)"
                 % (m.modName, spec.file, len(spec.actions)))
     return (stamp, m.modName)
 
-def _runOneCompile(m, spec, recorded):
+def _runOneCompile(m, spec, recorded, tx, pending):
     outPath = Paths.resolveResModsTarget(spec.out)
     if outPath is None:
         raise Exception('output path escapes res_mods/: %s' % spec.out)
@@ -188,22 +260,54 @@ def _runOneCompile(m, spec, recorded):
         absPath = Paths.resolveResModsTarget(rel)
         if absPath is None:
             raise Exception('source path escapes res_mods/: %s' % rel)
-        if not Paths.fileExists(absPath):
+        if absPath not in pending and not Paths.fileExists(absPath):
             raise Exception('source not found: %s' % rel)
         sourcePaths.append(absPath)
 
     stamp = Paths.hashBytes(''.join(
-        [_COMPILER_STAMP] + [Paths.hashFile(p) for p in sourcePaths]))
+        [_COMPILER_STAMP] + [_sourceHash(p, pending) for p in sourcePaths]))
     previous = recorded.get(spec.out)
     if (previous and previous[0] == stamp and Paths.fileExists(outPath)):
         return (stamp, m.modName)
 
     import UssCompile
-    data, count = UssCompile.compileMarkup(sourcePaths)
-    Paths.writeBytes(outPath, str(data))
+    data, count = UssCompile.compileMarkup(sourcePaths, pending)
+    tx.stage(outPath, str(data))
     logInfo("'%s' built %s from %d expression(s)"
             % (m.modName, spec.out, count))
     return (stamp, m.modName)
+
+def _sourceHash(absPath, pending):
+    if absPath in pending:
+        return Paths.hashBytes(pending[absPath])
+    return Paths.hashFile(absPath)
+
+def _revertOrphanedOutputs(recordedOutputs, claimedPaths, tx):
+    """A target no surviving mod claims goes back to stock content. Restoring
+    rather than deleting: the file keeps existing, so no res_mods entry is
+    left pointing at nothing."""
+    reverted = []
+    for relPath in sorted(recordedOutputs):
+        if relPath in claimedPaths:
+            continue
+        absPath = Paths.resolveResModsTarget(relPath)
+        if absPath is None:
+            continue
+        pristine = Resources.loadPristine(relPath)
+        if pristine is None:
+            logError('cannot restore %s: no pristine copy' % relPath)
+            continue
+        if Paths.fileExists(absPath) and Paths.readBytes(absPath) == pristine:
+            reverted.append(relPath)
+            continue
+        try:
+            tx.stage(absPath, pristine)
+        except Exception as exc:
+            logError('cannot restore %s: %s' % (relPath, exc))
+            continue
+        reverted.append(relPath)
+        logInfo('no mod edits %s any more; restoring the stock file' % relPath)
+    return reverted
 
 def _dropOrphanedCompiles(recorded, declaredPaths):
     for relPath in sorted(recorded):
@@ -315,6 +419,11 @@ def _serialize(doc):
 
     if not out.startswith('<?xml'):
         out = '<?xml version="1.0" ?>\n' + out
+    if isinstance(out, unicode):
+        # minidom hands back unicode; the target is opened 'wb', so anything
+        # above ASCII would raise on write and hash in a different domain
+        # from the same file read back. Mirrors Build.serialize.
+        out = out.encode('utf-8')
     return out
 
 def _loadRegistry():
@@ -344,14 +453,23 @@ def _loadRegistry():
         h = child.get('hash')
         if path and h:
             compiled[path] = (h, child.get('mod') or '')
+    stamps = {}
+    for child in root.findall('stamp'):
+        path = child.get('path')
+        size = child.get('size')
+        mtime = child.get('mtime')
+        if path and size is not None and mtime is not None:
+            stamps[path] = (size, mtime)
     return {
         'buildId': root.get('buildId'),
         'mods': mods,
         'outputs': outputs,
         'compiled': compiled,
+        'stamps': stamps,
     }
 
-def _saveRegistry(buildId, successfulManifests, outputHashes, compiled):
+def _saveRegistry(buildId, successfulManifests, outputHashes, compiled,
+                  stamps):
     root = _u2.Element('installed')
     root.set('buildId', buildId)
     root.set('installer', _installerVersion or '')
@@ -372,6 +490,13 @@ def _saveRegistry(buildId, successfulManifests, outputHashes, compiled):
         e.set('path', path)
         e.set('hash', stamp)
         e.set('mod', modName)
+
+    for path in sorted(stamps or {}):
+        size, mtime = stamps[path]
+        e = _u2.SubElement(root, 'stamp')
+        e.set('path', path)
+        e.set('size', size)
+        e.set('mtime', mtime)
     data = _u2.tostring(root)
     Paths.writeBytes(Paths.installedRegistryPath(), data)
 
@@ -382,9 +507,12 @@ def _finalize(_oldRegistry, successfulManifests, stats, installerVersion,
               outputHashes=None, compiled=None):
     global _installerVersion
     _installerVersion = installerVersion
+    # after the commit, so the mtimes recorded are the ones on disk
+    stamps = Guard.stampsFor(list((outputHashes or {}).keys())
+                             + list((compiled or {}).keys()))
     try:
         _saveRegistry(Paths.gameBuildId(), successfulManifests, outputHashes,
-                      compiled)
+                      compiled, stamps)
     except Exception as exc:
         logError('failed to write installed.xml: %s' % exc)
     Resources.shutdown()

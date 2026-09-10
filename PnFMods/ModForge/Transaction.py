@@ -9,6 +9,7 @@ class TransactionError(Exception):
 class Transaction(object):
     def __init__(self):
         self._pending = {}
+        self._committed = {}
 
     def stage(self, absPath, newBytes):
         priorBytes = None
@@ -24,19 +25,41 @@ class Transaction(object):
         if not self._pending:
             return
         written = []
+        current = None
         try:
             for absPath, (newBytes, _prior) in self._pending.items():
+                current = absPath
                 self._atomicWrite(absPath, newBytes)
                 written.append(absPath)
         except Exception as commitExc:
-            logError('commit failed for %s: %s' % (written[-1] if written else '?',
-                                                   commitExc))
+            logError('commit failed for %s: %s' % (current or '?', commitExc))
             self._rollback(written)
             raise
+        else:
+            for absPath in written:
+                self._committed[absPath] = self._pending[absPath][1]
         finally:
             self._sweepTempFiles(self._pending.keys())
 
             self._pending.clear()
+
+    def revertCommitted(self):
+        """Undo a batch that already landed, because a later batch that
+        depends on it failed. A compiled payload and the uss_settings entry
+        naming it have to move together: an XML registered against a SWF that
+        no longer carries its keys is a client that will not boot."""
+        if not self._committed:
+            return
+        for absPath in sorted(self._committed):
+            prior = self._committed[absPath]
+            try:
+                if prior is None:
+                    Paths.removeFile(absPath)
+                else:
+                    self._atomicWrite(absPath, prior)
+            except Exception as exc:
+                logError('revert failed for %s: %s' % (absPath, exc))
+        self._committed.clear()
 
     def _atomicWrite(self, absPath, data):
         Paths.ensureDir(Paths.dirName(absPath))

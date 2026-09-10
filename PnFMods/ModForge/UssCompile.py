@@ -28,15 +28,20 @@ def censoredStrings(poolStrings):
                 break
     return hits
 
-def compileMarkup(absXmlPaths):
+def compileMarkup(absXmlPaths, contents=None):
+    """`contents` supplies a source that is staged but not yet on disk, so a
+    payload and the SWF built from it can land in one commit."""
     abcFmt, ussBuild, ussSwf, ussTrans, ussXml = _modules()
 
+    staged = contents or {}
     collector = ussTrans.Collector()
     for path in absXmlPaths:
-        try:
-            data = Paths.readBytes(path)
-        except Exception as exc:
-            raise CompileError('cannot read %s: %s' % (path, exc))
+        data = staged.get(path)
+        if data is None:
+            try:
+                data = Paths.readBytes(path)
+            except Exception as exc:
+                raise CompileError('cannot read %s: %s' % (path, exc))
         try:
             root = _u2.fromstring(data)
         except Exception as exc:
