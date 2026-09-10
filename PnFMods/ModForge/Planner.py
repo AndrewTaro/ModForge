@@ -60,15 +60,16 @@ def _readManifestFile(absPath):
     return m
 
 def validateRequirements(manifests, installerVersion):
-    byName = dict((m.modName, m) for m in manifests)
-    accepted = []
-    for m in manifests:
-        if not _checkInstallerRequirement(m, installerVersion):
-            continue
-        if not _checkModRequirements(m, byName):
-            continue
-        accepted.append(m)
-    return accepted
+    present = set(m.modName for m in manifests)
+    accepted = [m for m in manifests
+                if _checkInstallerRequirement(m, installerVersion)]
+    while True:
+        byName = dict((m.modName, m) for m in accepted)
+        survivors = [m for m in accepted
+                     if _checkModRequirements(m, byName, present)]
+        if len(survivors) == len(accepted):
+            return survivors
+        accepted = survivors
 
 def _checkInstallerRequirement(m, installerVersion):
     req = m.installerRequirement
@@ -81,13 +82,18 @@ def _checkInstallerRequirement(m, installerVersion):
         return False
     return True
 
-def _checkModRequirements(m, byName):
+def _checkModRequirements(m, byName, present):
     for depName, constraint in m.modRequirements:
         dep = byName.get(depName)
         if dep is None:
-            logError(
-                "'%s' requires mod '%s' which is not installed; skipping"
-                % (m.modName, depName))
+            if depName in present:
+                logError(
+                    "'%s' requires mod '%s', which is present but was itself "
+                    "skipped; skipping" % (m.modName, depName))
+            else:
+                logError(
+                    "'%s' requires mod '%s' which is not installed; skipping"
+                    % (m.modName, depName))
             return False
         if constraint and not manifestMod.satisfiesConstraint(dep.version,
                                                               constraint):
