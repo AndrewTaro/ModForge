@@ -118,7 +118,13 @@ that mod is skipped with the reason in `python.log` rather than shipping a stale
   guessing between them. Further steps reach inside it: `block[@className='X']/style`.
 - `into="."` puts the copy at the root of the file being built. Children of `<copy>` are actions
   on the copy itself, so a `<setAttribute>` with no `select=` renames its root — which is how you
-  publish vanilla's definition under your own name instead of overriding the original.
+  publish vanilla's definition under your own name instead of overriding the original. Their
+  selectors are relative to the copy, and `.//` reaches anywhere inside it:
+  ```xml
+  <copy from="gui/unbound/markup.xml" select="block[@className='PortSwitcher']" into=".">
+    <remove select=".//bind[@name='scaleX']"/>
+  </copy>
+  ```
 - Without `from=`, `<copy>` clones from the file being edited rather than another one.
 
 ### Showing it in battle
@@ -180,12 +186,13 @@ an error, never quietly misread.
 | descendant | `.//b`, `a//b` |
 | attribute | `[@n='x']`, `[@n!='x']`, `[@n]` |
 | text | `[text()='x']`, `[text()]`, `[.='x']` |
+| substring | `[contains(@n,'x')]`, `[contains(.,'x')]`, `[contains(text(),'x')]` |
 | position | `[1]`, `[last()]` |
 
 Not supported, and refused: `//` from the root (there are no absolute paths — use `.//`), `|`,
 `position()>1`, `@a` as a step, and any value containing `]`.
 
-Four things that bite if you assume otherwise:
+Five things that bite if you assume otherwise:
 
 - **A predicate takes either quote style.** An Unbound `value=` is built out of single-quoted
   strings, so selecting a `<bind>` by its expression needs the double-quoted form:
@@ -199,6 +206,9 @@ Four things that bite if you assume otherwise:
   the first one anywhere, that is `.//b[1]`.
 - **`[text()='x']` tests each text child separately**; `[.='x']` compares the whole string value.
   Neither trims whitespace.
+- **`.//` searches descendants, a bare step searches children.** `bind[@name='x']` only sees direct
+  children; if the node is nested — a style property lives under `<style>`, for instance — you want
+  `.//bind[@name='x']` or the explicit path.
 
 Prefer a path plus a stable `@name` over a long value or an index where you have the choice —
 both of the latter break on the next patch, an index silently.

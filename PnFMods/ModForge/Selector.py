@@ -12,6 +12,9 @@ _TEXT_PRED_RE = re.compile(
     r"""^text\(\)\s*(!?=)\s*(?:'([^']*)'|"([^"]*)")$""")
 _TEXT_EXISTS_RE = re.compile(r'^text\(\)$')
 _VALUE_PRED_RE = re.compile(r"""^\.\s*(!?=)\s*(?:'([^']*)'|"([^"]*)")$""")
+_CONTAINS_RE = re.compile(
+    r"""^contains\(\s*(@[\w.\-]+|\.|text\(\))\s*,\s*"""
+    r"""(?:'([^']*)'|"([^"]*)")\s*\)$""")
 _POS_PRED_RE = re.compile(r'^(\d+|last\(\))$')
 
 class SelectorError(Exception):
@@ -39,6 +42,17 @@ class _Predicate(object):
             return found if self.op == '=' else not found
         if self.kind == 'textExists':
             return bool(_textChildren(node))
+        if self.kind == 'contains':
+            if self.name is None:
+                return self.value in _stringValue(node)
+            if self.name == 'text()':
+                for data in _textChildren(node):
+                    if self.value in data:
+                        return True
+                return False
+            if not node.hasAttribute(self.name):
+                return False
+            return self.value in node.getAttribute(self.name)
         if self.kind == 'value':
             equal = _stringValue(node) == self.value
             return equal if self.op == '=' else not equal
@@ -159,6 +173,15 @@ def _parsePredicate(body):
     if m:
         value = m.group(2) if m.group(2) is not None else m.group(3)
         return _Predicate('value', None, value, m.group(1))
+    m = _CONTAINS_RE.match(body)
+    if m:
+        target = m.group(1)
+        value = m.group(2) if m.group(2) is not None else m.group(3)
+        if target == '.':
+            return _Predicate('contains', None, value)
+        if target == 'text()':
+            return _Predicate('contains', 'text()', value)
+        return _Predicate('contains', target[1:], value)
     m = _POS_PRED_RE.match(body)
     if m:
         token = m.group(1)
