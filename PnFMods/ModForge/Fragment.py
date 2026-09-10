@@ -61,8 +61,10 @@ class Sources(object):
     def find(self, relPath, expr):
         steps = Selector.parseSelector(expr)
         head = steps[0]
-        if (head.tag not in ('.', '..', '*') and len(head.predicates) == 1
-                and head.predicates[0].kind == 'attr'):
+        if (head.axis == 'child' and head.tag not in ('.', '..', '*')
+                and len(head.predicates) == 1
+                and head.predicates[0].kind == 'attr'
+                and head.predicates[0].op == '='):
             nodes = self._sliced(relPath, head)
             rest = Selector.splitSteps(expr)[1:]
             if not rest:

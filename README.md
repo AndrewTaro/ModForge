@@ -168,16 +168,37 @@ If you ship a precompiled `.xml`/`.swf` pair, put it in `gui/unbound/mods/` and 
 | `<build file="…" root="ui">` | Generate a new file, starting from an empty `<ui>` document. |
 | `<ubCompile out="…" source="…"/>` | Compile markup into a `.swf`. Repeat `<source file="…"/>` as children to compile several files into one. |
 
-**Selectors**: child steps `a/b/c`, `.` / `..`, `*`, `[@name='x']`, `[text()='x']`, `[1]` /
-`[last()]`. No recursive `//`.
+### Selectors
 
-A predicate takes **either quote style**, which matters more than it looks: an Unbound `value=`
-is built out of single-quoted strings, so selecting a `<bind>` by its expression needs the other
-one. Positions are 1-based, and a value containing `]` cannot go in a predicate at all.
+A subset of XPath 1.0, and **everything in it means exactly what XPath means** — checked
+expression-by-expression against a real XPath engine. Anything outside the subset is refused with
+an error, never quietly misread.
 
-```xml
-<setAttribute select="bind[@value=&quot;isEnemy ? '-1' : '1'&quot;]" attribute="value" to="'1'"/>
-```
+| | |
+|---|---|
+| steps | `a/b/c`, `.`, `..`, `*` |
+| descendant | `.//b`, `a//b` |
+| attribute | `[@n='x']`, `[@n!='x']`, `[@n]` |
+| text | `[text()='x']`, `[text()]`, `[.='x']` |
+| position | `[1]`, `[last()]` |
+
+Not supported, and refused: `//` from the root (there are no absolute paths — use `.//`), `|`,
+`position()>1`, `@a` as a step, and any value containing `]`.
+
+Four things that bite if you assume otherwise:
+
+- **A predicate takes either quote style.** An Unbound `value=` is built out of single-quoted
+  strings, so selecting a `<bind>` by its expression needs the double-quoted form:
+  ```xml
+  <setAttribute select="bind[@value=&quot;isEnemy ? '-1' : '1'&quot;]" attribute="value" to="'1'"/>
+  ```
+- **A position indexes what the predicates before it selected**, not the raw sibling list.
+  `b[@n='x'][2]` is the second `x`-named `b`; `b[2][@n='x']` is the second `b`, kept only if it is
+  `x`-named. Positions are 1-based, so `[0]` matches nothing.
+- **A position applies per context node.** `a/b[1]` is the first `b` of *each* `a`. If you mean
+  the first one anywhere, that is `.//b[1]`.
+- **`[text()='x']` tests each text child separately**; `[.='x']` compares the whole string value.
+  Neither trims whitespace.
 
 Prefer a path plus a stable `@name` over a long value or an index where you have the choice —
 both of the latter break on the next patch, an index silently.
