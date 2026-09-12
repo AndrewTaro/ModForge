@@ -239,7 +239,20 @@ def _runBuilds(manifests, recorded, stamps, tx):
 
     for problem in Validate.duplicateDefinitions(emittedXml):
         logError(problem)
+    for problem in _styleProblems(emittedXml, sources):
+        logError(problem)
     return built, failedNames, declared, sources, registration
+
+def _styleProblems(emittedXml, sources):
+    """Gated on a use existing: resolving needs the vanilla styles index,
+    and a run that emits no `<styleClass>` should not pay for building it."""
+    if not [1 for _rel, data in emittedXml if Validate.styleClassUses(data)]:
+        return []
+    try:
+        vanilla = sources.index(Manifest.VANILLA_STYLES, 'css', 'name')
+    except Exception as exc:
+        return ['cannot check style references: %s' % exc]
+    return Validate.unresolvedStyleClasses(emittedXml, vanilla)
 
 class _Definition(object):
     __slots__ = ('namespace', 'name', 'relPath', 'absPath', 'data', 'isNew',

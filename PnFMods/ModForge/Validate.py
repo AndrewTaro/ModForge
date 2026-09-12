@@ -240,6 +240,50 @@ def duplicateDefinitions(emitted):
                 % (tag, attr, name, ', '.join(files)))
     return problems
 
+def styleClassUses(data):
+    """name -> how many `<styleClass value=>` name it, at any depth.
+
+    It is a child ELEMENT, not an attribute: 5,469 of them in vanilla
+    markup.xml across build 13187581, zero in the attribute form. The scan
+    goes through `BlockSlice.iter_tags`, so a commented-out example does not
+    count as a use."""
+    import BlockSlice
+    out = {}
+    for _kind, tag, start, end in BlockSlice.iter_tags(data):
+        if tag != 'styleClass':
+            continue
+        value = BlockSlice.tag_attrs(data, start, end).get('value')
+        if value is not None:
+            out[value] = out.get(value, 0) + 1
+    return out
+
+def unresolvedStyleClasses(emitted, definedElsewhere):
+    """`<styleClass value=>` naming no preset anything in this run defines.
+
+    The asymmetry is the point: a missing registered XML THROWS, but an
+    unresolved styleClass is completely silent -- `getStyleClassById` returns
+    undefined with no guard, the merge loop runs zero times, and nothing is
+    logged anywhere. The element renders with inherited values and the author
+    gets no signal at all. Forge holds both sides, so it can say so.
+
+    Calibrated against vanilla: 156 names used, 286 defined, 0 unresolved on
+    both 13015811 and 13187581 -- so a hit here is a real fault, not noise."""
+    import BlockSlice
+    defined = set(definedElsewhere)
+    for _relPath, data in emitted:
+        defined |= set(BlockSlice.top_level_index(data, 'css', 'name'))
+
+    problems = []
+    for relPath, data in emitted:
+        for name in sorted(styleClassUses(data)):
+            if name not in defined:
+                problems.append(
+                    "%s: <styleClass value='%s'> names no preset vanilla or "
+                    "any mod in this run defines; it is ignored in game with "
+                    "nothing logged, and the element keeps inherited values"
+                    % (relPath, name))
+    return problems
+
 def unbound2ElementNames():
     modNames = _modElementNames()
     vanillaNames = _vanillaElementNames()
