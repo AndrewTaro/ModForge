@@ -226,8 +226,15 @@ def _runBuilds(manifests, recorded, stamps, tx):
                 failedNames.add(m.modName)
 
     survivors = [m for m in manifests if m.modName not in failedNames]
-    registration = _runDefinitions(survivors, sources, recorded, stamps, tx,
-                                   pending, built, declared, failedNames)
+    try:
+        registration = _runDefinitions(survivors, sources, recorded, stamps,
+                                       tx, pending, built, declared,
+                                       failedNames)
+    except Exception as exc:
+        # Nothing registered beats a traceback that installs no mod at all.
+        logError('the definitions could not be built (%s: %s); none of them '
+                 'are registered' % (type(exc).__name__, exc))
+        registration = None
     return built, failedNames, declared, sources, registration
 
 class _Definition(object):
@@ -259,9 +266,9 @@ def _runDefinitions(manifests, sources, recorded, stamps, tx, pending, built,
 
     dropped = set()
     swf, count = _compileDefinitions(paths, pending, dropped)
+    kept = _coveredByTheSwf(emitted, dropped, pending)
     for absPath in dropped:
         del pending[absPath]
-    kept = [d for d in emitted if d.absPath not in dropped]
     for d in kept:
         declared.add(d.relPath)
         _stageDefinition(d, recorded, stamps, tx, built)
@@ -276,6 +283,32 @@ def _runDefinitions(manifests, sources, recorded, stamps, tx, pending, built,
     return Manifest.registrationBuild(
         [Manifest.ussDefinitionPath(d.namespace, d.name) for d in kept],
         swfPath)
+
+def _coveredByTheSwf(emitted, dropped, pending):
+    """Which definitions may be registered: the ones whose every expression
+    key is in the SWF this run compiled.
+
+    A key the SWF lacks is not caught at load -- `UbNativeExpression` stores
+    null and `eval` CALLS it, so it is a #1006 on whatever screen first
+    builds that block. This is the one gate: what the compile rejected has no
+    keys in the SWF, so it fails here too."""
+    import UssCompile
+    covered = UssCompile.expressionKeys(
+        [d.absPath for d in emitted if d.absPath not in dropped], pending)
+    out = []
+    for d in emitted:
+        try:
+            missing = UssCompile.expressionKeys([d.absPath], pending) - covered
+        except Exception as exc:
+            missing = [exc]
+        if missing:
+            logError('%s: %d expression(s) the compiled SWF does not carry; '
+                     'not registering it rather than shipping a block that '
+                     'throws when it is built' % (d.relPath, len(missing)))
+            dropped.add(d.absPath)
+            continue
+        out.append(d)
+    return out
 
 def _mergeDefinitions(manifests, sources):
     """(emitted, failedNames), re-merged until the failed set is stable.
@@ -339,7 +372,13 @@ def _compileDefinitions(paths, pending, dropped):
         good.append(absPath)
     if not good:
         return None, 0
-    return UssCompile.compileMarkup(good, pending, allowEmpty=True)
+    try:
+        return UssCompile.compileMarkup(good, pending, allowEmpty=True)
+    except Exception as exc:
+        logError('the definitions still do not compile with the %d bad one(s) '
+                 'out; none are registered: %s' % (len(dropped), exc))
+        dropped.update(good)
+        return None, 0
 
 def _stageDefinition(d, recorded, stamps, tx, built):
     stamp = Paths.hashBytes(d.data)
