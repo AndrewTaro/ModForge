@@ -299,12 +299,13 @@ def _coveredByTheSwf(emitted, dropped, pending):
     for d in emitted:
         try:
             missing = UssCompile.expressionKeys([d.absPath], pending) - covered
+            why = '%d expression(s) the compiled SWF does not carry' % len(
+                missing)
         except Exception as exc:
-            missing = [exc]
+            missing, why = True, 'its expressions cannot be read back: %s' % exc
         if missing:
-            logError('%s: %d expression(s) the compiled SWF does not carry; '
-                     'not registering it rather than shipping a block that '
-                     'throws when it is built' % (d.relPath, len(missing)))
+            logError('%s: %s; not registering it rather than shipping a block '
+                     'that throws when it is built' % (d.relPath, why))
             dropped.add(d.absPath)
             continue
         out.append(d)
