@@ -9,6 +9,10 @@ from Codec import _u2
 class ActionError(Exception):
     pass
 
+# Claim markers live ON the node, written by applySetAttribute when a tracker
+# is passed. Stripped before the document is serialized.
+CLAIM_PREFIX = '_forgeClaim-'
+
 def _etToMinidomNodes(etElements, ownerDoc):
     out = []
     for el in etElements:
@@ -60,7 +64,8 @@ def _canonical(node):
     attrs = ''
     if node.attributes:
         pairs = sorted((k, node.getAttribute(k))
-                       for k in node.attributes.keys())
+                       for k in node.attributes.keys()
+                       if not k.startswith(CLAIM_PREFIX))
         attrs = ','.join('%s=%s' % pair for pair in pairs)
     text = ''.join(c.data for c in node.childNodes
                    if c.nodeType == c.TEXT_NODE).strip()
@@ -94,13 +99,13 @@ def evaluateGuards(root, guards):
                 return False
     return True
 
-def applyInsert(doc, action, label, root, sources):
+def applyInsert(doc, action, label, root, sources, claims=None):
     parent, anchor = _resolveInsertionPoint(root, action.into,
                                             action.before, action.after)
     nodes = _etToMinidomNodes(action.payload, doc)
     return _insertDeduped(parent, nodes, anchor, label)
 
-def applyRemove(doc, action, label, root, sources):
+def applyRemove(doc, action, label, root, sources, claims=None):
     matches = Selector.findAll(root, action.select)
     if not matches:
         raise ActionError('remove select matched nothing: %s' % action.select)
@@ -108,7 +113,7 @@ def applyRemove(doc, action, label, root, sources):
         node.parentNode.removeChild(node)
     return len(matches)
 
-def applyReplace(doc, action, label, root, sources):
+def applyReplace(doc, action, label, root, sources, claims=None):
     matches = Selector.findAll(root, action.select)
     if not matches:
         raise ActionError('replace select matched nothing: %s' % action.select)
@@ -122,7 +127,7 @@ def applyReplace(doc, action, label, root, sources):
             parent.insertBefore(clone, anchor)
     return len(matches)
 
-def applySetAttribute(doc, action, label, root, sources):
+def applySetAttribute(doc, action, label, root, sources, claims=None):
     if action.select is None:
         matches = [root]
     else:
@@ -132,6 +137,9 @@ def applySetAttribute(doc, action, label, root, sources):
                               % action.select)
     changed = 0
     for node in matches:
+        if claims is not None and not claims.claim(node, action.attribute,
+                                                   label):
+            continue
         if action.fromValue is None:
             node.setAttribute(action.attribute, action.toValue)
             changed += 1
@@ -146,7 +154,7 @@ def applySetAttribute(doc, action, label, root, sources):
         changed += 1
     return changed
 
-def applyCopy(doc, action, label, root, sources):
+def applyCopy(doc, action, label, root, sources, claims=None):
     if action.source:
         if sources is None:
             raise ActionError('copy from= is not available here: %s'
@@ -168,7 +176,7 @@ def applyCopy(doc, action, label, root, sources):
         clone = (doc.importNode(src, True) if action.source
                  else src.cloneNode(True))
         for nested in action.actions:
-            applyAction(doc, nested, label, clone, sources)
+            applyAction(doc, nested, label, clone, sources, claims)
         parent.insertBefore(clone, anchor)
         count += 1
     return count
@@ -181,10 +189,10 @@ _DISPATCH = {
     'copy': applyCopy,
 }
 
-def applyAction(doc, action, label='', root=None, sources=None):
+def applyAction(doc, action, label='', root=None, sources=None, claims=None):
     fn = _DISPATCH.get(action.kind)
     if fn is None:
         raise ActionError('unknown action kind: %s' % action.kind)
     if root is None:
         root = doc.documentElement
-    return fn(doc, action, label, root, sources)
+    return fn(doc, action, label, root, sources, claims)

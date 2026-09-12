@@ -28,6 +28,10 @@ class _Stats(object):
         self.skipped = 0
         self.failed = 0
         self.removed = 0
+        self.definitions = 0
+        self.definitionsNew = 0
+        self.definitionsDropped = 0
+        self.conflicts = 0
 
 def runInstaller(installerVersion):
     stats = _Stats()
@@ -71,7 +75,7 @@ def runInstaller(installerVersion):
     payloadTx = Transaction()
     (compiled, compileFailed, declared, sources,
      registration) = _runBuilds(eligible, wasCompiled, recordedStamps,
-                                payloadTx)
+                                payloadTx, stats)
     try:
         payloadTx.commit()
     except Exception as exc:
@@ -202,7 +206,7 @@ def _backupDrifted(relPath, absPath):
         return None
     return dest
 
-def _runBuilds(manifests, recorded, stamps, tx):
+def _runBuilds(manifests, recorded, stamps, tx, stats):
     import Fragment
     sources = Fragment.Sources()
     built = {}
@@ -230,7 +234,7 @@ def _runBuilds(manifests, recorded, stamps, tx):
     try:
         registration = _runDefinitions(survivors, sources, recorded, stamps,
                                        tx, pending, built, declared,
-                                       failedNames, emittedXml)
+                                       failedNames, emittedXml, stats)
     except Exception as exc:
         # Nothing registered beats a traceback that installs no mod at all.
         logError('the definitions could not be built (%s: %s); none of them '
@@ -259,11 +263,11 @@ class _Definition(object):
                  'contributors')
 
 def _runDefinitions(manifests, sources, recorded, stamps, tx, pending, built,
-                    declared, failedNames, emittedXml):
+                    declared, failedNames, emittedXml, stats):
     """One XML per definition merged across every mod that names it, and one
     shared SWF over all of them. Returns what to register, or None."""
     import Definitions
-    emitted, failed = _mergeDefinitions(manifests, sources)
+    emitted, failed, stats.conflicts = _mergeDefinitions(manifests, sources)
     failedNames |= failed
     if not emitted:
         return None
@@ -286,6 +290,9 @@ def _runDefinitions(manifests, sources, recorded, stamps, tx, pending, built,
     kept = _coveredByTheSwf(emitted, dropped, pending)
     for absPath in dropped:
         del pending[absPath]
+    stats.definitions = len(kept)
+    stats.definitionsNew = len([1 for d in kept if d.isNew])
+    stats.definitionsDropped = len(emitted) - len(kept)
     for d in kept:
         declared.add(d.relPath)
         emittedXml.append((d.relPath, d.data))
@@ -330,7 +337,8 @@ def _coveredByTheSwf(emitted, dropped, pending):
     return out
 
 def _mergeDefinitions(manifests, sources):
-    """(emitted, failedNames), re-merged until the failed set is stable.
+    """(emitted, failedNames, refusedWrites), re-merged until the failed set
+    is stable.
 
     A mod dropped over one definition must not stay applied in another, and
     a failure is only known once its actions have run."""
@@ -367,7 +375,7 @@ def _mergeDefinitions(manifests, sources):
                                   if m.modName in landed]
                 emitted.append(d)
         if not roundFailed:
-            return emitted, failed
+            return emitted, failed, len(merger.refused)
         failed |= roundFailed
 
 def _compileDefinitions(paths, pending, dropped):

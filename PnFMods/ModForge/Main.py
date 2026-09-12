@@ -26,5 +26,13 @@ def _run():
         'unchanged=%d skipped=%d failed=%d removed=%d'
         % (elapsed, stats.discovered, stats.installed, stats.updated,
            stats.unchanged, stats.skipped, stats.failed, stats.removed))
+    # Counted separately from mods because the interesting number is the one
+    # the author can compare against what they meant: expecting five
+    # overrides and reading 'created=1' is the only signal a name was typo'd.
+    logInfo('definitions: %d registered (%d created, %d overridden), '
+            '%d dropped, %d conflicting write(s)'
+            % (stats.definitions, stats.definitionsNew,
+               stats.definitions - stats.definitionsNew,
+               stats.definitionsDropped, stats.conflicts))
 
 _run()

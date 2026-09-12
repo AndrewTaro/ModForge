@@ -1,8 +1,9 @@
 # ModForge
 
 A mod installer for World of Warships. It patches the game's own UI files from small XML
-**blueprints**, so several mods can edit the same vanilla file without overwriting each other,
-and builds a mod's own Unbound 1 payload out of the current build's markup.
+**blueprints**, so several mods can edit the same vanilla file — or the same Unbound 1
+definition — without overwriting each other, and builds their payloads out of the current
+build's markup.
 
 Usually bundled inside other mods' packs, not installed on its own. It runs once at game start,
 has no UI, and reverts every file to stock when removed.
@@ -11,9 +12,10 @@ has no UI, and reverts every file to stock when removed.
 
 1. **Discover** every blueprint under `res_mods/ForgeBlueprints/` and `res_mods/PnFMods/*/manifest.xml`.
 2. **Check requirements** — installer version and mod dependencies; unmet ones skip that mod only.
-3. **Build** any Unbound 1 payload a blueprint declares — generate the markup from vanilla,
-   compile the `.swf`.
-4. **Order** by dependency, then `priority`, then filename.
+3. **Order** by dependency, then `priority`, then filename.
+4. **Merge each Unbound 1 definition** every blueprint names — one document per `<block>` or
+   `<css>`, sliced from the current build and carrying every mod's edits to it — then compile one
+   shared `.swf` and register what it wrote.
 5. **Fetch the pristine original** of each target file (from `res/`, or unpacked from the `.pkg`).
 6. **Apply every mod's edits** and write the merged files.
 
@@ -29,13 +31,17 @@ It skips the whole run if no blueprint, mod set, or game build changed since las
   only that one mod goes inert.
 - **Incremental.** Tracks what it wrote; rebuilds a file if something else overwrote it, and
   re-fetches originals when the game updates.
-- **Builds Unbound 1 payloads.** Ship the `.xml`; ModForge compiles the `.swf` the client needs,
-  so there is no build tool to run and nothing to rebuild by hand when you edit an expression.
-- **Tracks vanilla markup and styles.** Describe your changes to a vanilla `<block>` or `<css>`
-  instead of copying it, and the copy is re-cut from the current build every launch — no
-  re-diffing after a patch.
-- **Handles the boilerplate.** One element registers your payload in `uss_settings.xml`;
-  another mounts an element in battle, both entries it needs.
+- **Merges Unbound 1 definitions across mods.** Name the `<block>` or `<css>` you change, not a
+  file. Two mods changing the same one contribute to a single document instead of shipping rival
+  files where the last loaded wins; `priority` settles a real collision and the run reports it.
+- **Tracks vanilla markup and styles.** Your mod describes its changes rather than carrying a
+  copy, and the baseline is re-cut from the current build every launch — no re-diffing after a
+  patch.
+- **No build step.** ModForge decides the files, compiles the `.swf` the client needs, and writes
+  the `uss_settings.xml` entries. Nothing to rebuild by hand when you edit an expression.
+- **Checks what the client will not.** An expression key the compiled `.swf` lacks, a
+  `styleClass` that resolves to nothing, a definition two files declare — each is silent in game
+  and each is an install-time line in `python.log`.
 
 ## Writing a blueprint
 
@@ -68,8 +74,9 @@ and list the changes:
     <setAttribute select=".//bind[@name='text']" attribute="value" to="'Hello'"/>
   </ubBuildBlock>
 
-  <ubBuildStyle name="$BattleLoadingHeader">
-    <setAttribute select="./fontSize" attribute="value" to="21"/>
+  <ubBuildStyle name="$TextHeaderBold">
+    <setAttribute select="./fontSize" attribute="value" to="19"/>
+    <setAttribute select="./textColor" attribute="value" to="0xFFCC66"/>
   </ubBuildStyle>
 </mod>
 ```
@@ -80,13 +87,25 @@ anything inside it.
 
 The point of naming the definition rather than a file: **two mods editing the same one merge.**
 Each contributes its own edits to one document, so you get both, instead of two files racing to
-define the same name with the last one loaded winning. If two mods change the same attribute, the
-run says so.
+define the same name with the last one loaded winning.
+
+Where they genuinely collide, `priority` decides and the run says so:
+
+- **Same attribute of the same element.** The higher `priority` wins; the loser is named in
+  `python.log` and its *other* edits still land. Nothing is silently overwritten.
+- **One mod removes what another edits.** That one selector is skipped, reported, and the rest of
+  the mod still applies. A selector that never matched anything in vanilla is still your own
+  error and still reverts your whole contribution to that definition — the two cases are told
+  apart by replaying the action against the untouched definition.
 
 The baseline is sliced out of the build the player is running, every launch, so nothing in your
-mod is a frozen copy of vanilla. A name the build no longer defines is reported; a name it never
-defined is created from empty, and the run counts those separately (`4 overridden, 1 created`) —
-which is your only signal for a typo.
+mod is a frozen copy of vanilla.
+
+A name vanilla does not define is **created from empty** rather than refused — it has to be, since
+a new definition of your own is the same thing from the outside. So the run counts the two
+separately (`4 overridden, 1 created`), and that count is your only signal for a misspelt name or
+one the game renamed in the last patch: both show up as `created` where you meant `overridden`,
+and the definition then renders nothing at all.
 
 If your markup will not compile, that definition alone is dropped and the reason is in
 `python.log`. One error is worth knowing about in advance: the client blanks six identifiers in
@@ -117,8 +136,8 @@ would silently misbehave.
 
 ### Showing it in battle
 
-Registering a payload makes the client load it; it does not put anything on screen in battle.
-`<ubMountInBattle>` writes the `battle_elements.xml` entries that do:
+A registered definition is loaded by the client; that alone does not put anything on screen in
+battle. `<ubMountInBattle>` writes the `battle_elements.xml` entries that do:
 
 ```xml
 <ubMountInBattle unbound="1" rootElementId="MyModContainer"/>
@@ -134,7 +153,8 @@ and is **required** — the two are written differently in all three places that
 | controller | written — without it the element is listed and never constructed | none |
 
 There is no default and no guess. ModForge cannot tell the two apart from the id: an Unbound 1
-root is a `<block>` in your own payload, which does not exist yet when the macro expands. Naming the wrong one produces a well-formed entry that simply never renders.
+root is a `<block>` in a definition that has not been merged yet when the macro expands. Naming
+the wrong one produces a well-formed entry that simply never renders.
 
 `name=` is the instance name the client uses internally and defaults to `rootElementId`;
 `hitTest="false"` opts out of mouse hit-testing, worth doing for anything purely decorative.
@@ -192,7 +212,7 @@ Five things that bite if you assume otherwise:
 Prefer a path plus a stable `@name` over a long value or an index where you have the choice —
 both of the latter break on the next patch, an index silently.
 
-**Actions** inside a `<build>`:
+**Actions**, the body of a `<build>` or either definition verb:
 
 | Action | Does |
 |---|---|
@@ -206,7 +226,12 @@ A `<guard ifExists="sel"/>` or `<guard ifNotExists="sel"/>` at the top of a `<bu
 unless the condition holds. Reach for a guard only for real conditional logic (e.g. patch differently
 depending on another mod). You don't need one to avoid installing twice: re-applying is idempotent —
 identical inserts are skipped, and an unchanged run is a no-op — so the old "skip if my element
-already exists" guard is unnecessary. A `root=` build has nothing to test, so it takes no guard.
+already exists" guard is unnecessary.
+
+A guard reads the document it edits, so two places refuse one outright rather than quietly
+treating every condition as false: a `root=` build, which starts from an empty document, and
+`<ubBuildBlock>` / `<ubBuildStyle>`, which are assembled from the vanilla definition when there
+is one and from nothing when there is not.
 
 Worth knowing:
 
@@ -217,5 +242,9 @@ Worth knowing:
 - **Failures are contained, not silent.** A selector that matches nothing (or any error) reverts
   just your mod's edits to that file and moves on — the rest still install. Unknown attributes and
   elements are warnings, not fatal. Watch `python.log` for `[ModForge]` lines.
+- **The summary line is worth reading.** Alongside the mod counts, each run prints
+  `definitions: N registered (X created, Y overridden), Z dropped, C conflicting write(s)`.
+  `created` where you expected `overridden` means a misspelt name; `dropped` means a definition
+  did not survive the compile and is not registered at all.
 - `file=` is relative to `res_mods/`. ModForge fetches the original even if the game only ships it
   packed, so you can target any vanilla UI file, not just already-unpacked ones.

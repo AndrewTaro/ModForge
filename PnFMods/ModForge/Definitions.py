@@ -1,13 +1,15 @@
 # coding=utf-8
 
+import re
+
 from xml.dom import minidom as _minidom
 
 import Build
 import BlockSlice
 import Manifest
 import Paths
-from Actions import applyAction
-from Logger import logError
+from Actions import CLAIM_PREFIX, applyAction
+from Logger import logError, logInfo
 
 class DefinitionError(Exception):
     pass
@@ -40,12 +42,51 @@ def collect(orderedManifests):
 def label(namespace, name):
     return "<%s name='%s'>" % (Manifest.DEFINITION_VERBS[namespace], name)
 
+_NAME_RE = re.compile(r'^[A-Za-z_][\w.\-]*$')
+
+class Claims(object):
+    """Which mod already wrote which attribute, so PRIORITY decides a
+    same-attribute conflict rather than apply order.
+
+    Contributors run highest priority first, so the first claim wins and a
+    later write is refused and reported. The claim is recorded ON the node,
+    not in a side table: a failed contributor is rolled back by restoring a
+    CLONE of the document, so an identity-keyed table would go stale, and a
+    path-keyed one shifts the moment a peer inserts a sibling."""
+
+    def __init__(self):
+        self.refused = []
+
+    def claim(self, node, attr, modName):
+        if not _NAME_RE.match(attr or ''):
+            # The marker would not be a legal attribute name, and such an
+            # attribute is already meaningless to Unbound.
+            return True
+        key = CLAIM_PREFIX + attr
+        held = node.getAttribute(key) if node.hasAttribute(key) else None
+        if held is not None and held != modName:
+            self.refused.append((modName, held, node.tagName, attr))
+            return False
+        node.setAttribute(key, modName)
+        return True
+
+def stripClaims(node):
+    """Markers must never reach the payload. Unbound ignores an attribute it
+    does not name, silently, so a leak would ship and show no symptom."""
+    if node.nodeType == node.ELEMENT_NODE and node.attributes:
+        for key in [k for k in node.attributes.keys()
+                    if k.startswith(CLAIM_PREFIX)]:
+            node.removeAttribute(key)
+    for child in node.childNodes:
+        stripClaims(child)
+
 class Merger(object):
     """Assembles one document per definition out of vanilla plus every mod
     that names it."""
 
     def __init__(self, sources):
         self.sources = sources
+        self.refused = []
         self._allNames = {}
 
     def build(self, key, contributions, appliedOut=None, failedOut=None):
@@ -55,17 +96,17 @@ class Merger(object):
         before it and reported; its peers still land."""
         namespace, name = key
         doc, isNew = self.baseline(namespace, name)
+        pristine = doc.cloneNode(True)
+        claims = Claims()
         applied = []
         try:
             for m, spec in contributions:
                 snapshot = doc.cloneNode(True)
+                refusedMark = len(claims.refused)
                 try:
                     _checkSources(spec.actions)
-                    changed = 0
-                    for action in spec.actions:
-                        changed += applyAction(doc, action, m.modName,
-                                               _element(doc, namespace, name),
-                                               self.sources) or 0
+                    changed = self._contribute(doc, snapshot, pristine, m,
+                                               spec, key, claims)
                     _checkShape(doc, namespace, name)
                 except Exception as exc:
                     logError("'%s' failed on %s: %s: %s"
@@ -75,17 +116,76 @@ class Merger(object):
                         failedOut.add(m.modName)
                     doc.unlink()
                     doc = snapshot
+                    # A mod that did not land holds no claims and lost no
+                    # conflict. Its successful claims need no undo -- they
+                    # live on nodes in the document being discarded, which is
+                    # why the markers sit on the nodes at all.
+                    del claims.refused[refusedMark:]
                     continue
                 snapshot.unlink()
                 if changed:
                     applied.append(m.modName)
                     if appliedOut is not None:
                         appliedOut.add(m.modName)
+            self._reportRefused(claims, key)
+            self.refused.extend(claims.refused)
             if not applied:
                 return None, isNew
+            stripClaims(doc.documentElement)
             return Build.serialize(doc), isNew
         finally:
+            pristine.unlink()
             doc.unlink()
+
+    def _contribute(self, doc, snapshot, pristine, m, spec, key, claims):
+        namespace, name = key
+        changed = 0
+        for action in spec.actions:
+            try:
+                changed += applyAction(doc, action, m.modName,
+                                       _element(doc, namespace, name),
+                                       self.sources, claims) or 0
+            except Exception as exc:
+                if self._blame(action, snapshot, pristine, key) != 'peer':
+                    raise
+                logInfo("'%s': %s on %s skipped -- a mod applied before it "
+                        "changed what that names (%s)"
+                        % (m.modName, action.kind, label(namespace, name),
+                           exc))
+        return changed
+
+    def _blame(self, action, snapshot, pristine, key):
+        """'self' | 'peer' | 'author' for an action that just raised.
+
+        Replayed rather than reasoned about: the message does not say WHICH
+        selector missed. Against the document as it stood when this mod
+        started, a failure is the mod's own earlier action; against the
+        pristine definition, it is a peer's edit; failing on both means the
+        name was never there."""
+        if self._replays(action, snapshot, key):
+            return 'self'
+        if self._replays(action, pristine, key):
+            return 'peer'
+        return 'author'
+
+    def _replays(self, action, doc, key):
+        namespace, name = key
+        trial = doc.cloneNode(True)
+        try:
+            applyAction(trial, action, '', _element(trial, namespace, name),
+                        self.sources)
+            return True
+        except Exception:
+            return False
+        finally:
+            trial.unlink()
+
+    def _reportRefused(self, claims, key):
+        namespace, name = key
+        for modName, held, tagName, attr in claims.refused:
+            logError("'%s' cannot set %s on <%s> in %s: '%s' set it first and "
+                     "has the higher priority"
+                     % (modName, attr, tagName, label(namespace, name), held))
 
     def baseline(self, namespace, name):
         """(document, isNew), the definition element its only child."""
