@@ -78,7 +78,6 @@ def runInstaller(installerVersion):
         logError('payload commit failed: %s' % exc)
         Resources.shutdown()
         return stats
-    _dropOrphanedCompiles(wasCompiled, declared)
 
     builtChanged = compiled != wasCompiled
     # Before the early return, not after: an output clobbered by another
@@ -89,6 +88,7 @@ def runInstaller(installerVersion):
     if not changed and not buildChanged and not builtChanged and not drift:
         logInfo('no manifest changes since last run; nothing to do')
         stats.unchanged = len(manifests)
+        _dropOrphanedCompiles(wasCompiled, declared)
         return stats
     if not changed and not buildChanged and not builtChanged and drift:
         logInfo('manifests unchanged but an output drifted; re-applying')
@@ -163,6 +163,11 @@ def runInstaller(installerVersion):
         Resources.shutdown()
         return stats
 
+    # After the commit, never before: a file pruned while uss_settings still
+    # names it is the registered-but-absent entry that stalls the boot, and a
+    # run that fails between the two leaves exactly that.
+    _dropOrphanedCompiles(wasCompiled, declared)
+
     successful = [m for m in ordered if m.modName not in failed]
     return _finalize(registry, successful, stats, installerVersion,
                      Guard.outputHashes(staged), compiled)
@@ -219,19 +224,6 @@ def _runBuilds(manifests, recorded, stamps, tx):
                 logError("'%s' cannot generate %s: %s"
                          % (m.modName, spec.file, exc))
                 failedNames.add(m.modName)
-        if m.modName in failedNames:
-            for spec in m.compiles:
-                declared.add(spec.out)
-            continue
-        for spec in m.compiles:
-            declared.add(spec.out)
-            try:
-                built[spec.out] = _runOneCompile(m, spec, recorded, tx,
-                                                 pending)
-            except Exception as exc:
-                logError("'%s' cannot build %s: %s"
-                         % (m.modName, spec.out, exc))
-                failedNames.add(m.modName)
 
     survivors = [m for m in manifests if m.modName not in failedNames]
     registration = _runDefinitions(survivors, sources, recorded, stamps, tx,
@@ -274,6 +266,8 @@ def _runDefinitions(manifests, sources, recorded, stamps, tx, pending, built,
         declared.add(d.relPath)
         _stageDefinition(d, recorded, stamps, tx, built)
 
+    if not kept:
+        return None
     swfPath = None
     if count:
         _stageDefinitionsSwf(swf, [d.absPath for d in kept], pending,
@@ -397,33 +391,6 @@ def _runOneGenerated(m, spec, sources, recorded, stamps, tx, pending):
         tx.stage(outPath, data)
         logInfo("'%s' generated %s from %d instruction(s)"
                 % (m.modName, spec.file, len(spec.actions)))
-    return (stamp, m.modName)
-
-def _runOneCompile(m, spec, recorded, tx, pending):
-    outPath = Paths.resolveResModsTarget(spec.out)
-    if outPath is None:
-        raise Exception('output path escapes res_mods/: %s' % spec.out)
-
-    sourcePaths = []
-    for rel in spec.sources:
-        absPath = Paths.resolveResModsTarget(rel)
-        if absPath is None:
-            raise Exception('source path escapes res_mods/: %s' % rel)
-        if absPath not in pending and not Paths.fileExists(absPath):
-            raise Exception('source not found: %s' % rel)
-        sourcePaths.append(absPath)
-
-    stamp = Paths.hashBytes(''.join(
-        [_COMPILER_STAMP] + [_sourceHash(p, pending) for p in sourcePaths]))
-    previous = recorded.get(spec.out)
-    if (previous and previous[0] == stamp and Paths.fileExists(outPath)):
-        return (stamp, m.modName)
-
-    import UssCompile
-    data, count = UssCompile.compileMarkup(sourcePaths, pending)
-    tx.stage(outPath, str(data))
-    logInfo("'%s' built %s from %d expression(s)"
-            % (m.modName, spec.out, count))
     return (stamp, m.modName)
 
 def _sourceHash(absPath, pending):

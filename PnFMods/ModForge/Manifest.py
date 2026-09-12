@@ -22,7 +22,6 @@ class Manifest(object):
         'installerRequirement',
         'modRequirements',
         'builds',
-        'compiles',
         'definitions',
         'sourcePath',
         'sourceHash',
@@ -35,7 +34,6 @@ class Manifest(object):
         self.installerRequirement = None
         self.modRequirements = []
         self.builds = []
-        self.compiles = []
         self.definitions = []
         self.sourcePath = None
         self.sourceHash = None
@@ -56,13 +54,6 @@ class BuildSpec(object):
         self.root = None
         self.guards = []
         self.actions = []
-
-class CompileSpec(object):
-    __slots__ = ('out', 'sources')
-
-    def __init__(self):
-        self.out = None
-        self.sources = []
 
 class Guard(object):
     __slots__ = ('kind', 'expr')
@@ -110,13 +101,24 @@ _KNOWN_REPLACE_ATTRS = set(['select'])
 _KNOWN_SET_ATTRIBUTE_ATTRS = set(['select', 'attribute', 'from', 'to'])
 _KNOWN_COPY_ATTRS = set(['select', 'from', 'into', 'before', 'after'])
 _KNOWN_GUARD_ATTRS = set(['ifExists', 'ifNotExists'])
-_KNOWN_COMPILE_ATTRS = set(['out', 'source'])
-_KNOWN_SOURCE_ATTRS = set(['file'])
-_KNOWN_UB_BUILD_ATTRS = set(['name', 'autoCompile'])
 _KNOWN_DEFINITION_ATTRS = set(['name'])
-_KNOWN_UB_REGISTER_ATTRS = set(['name', 'swf'])
 _KNOWN_UB_MOUNT_ATTRS = set(['unbound', 'rootElementId', 'name', 'hitTest',
                              'url'])
+
+# Refused, not ignored: the unknown-element path below only logs, and a
+# blueprint that silently stops building anything is worse than one that
+# will not parse.
+_REMOVED_VERBS = {
+    'ubBuild': "<ubBuild> is gone. Name the definition you edit -- "
+               "<ubBuildBlock name='...'> or <ubBuildStyle name='...'> -- and "
+               "Forge picks the file, the compile and the registration, so "
+               "two mods editing one definition merge instead of racing.",
+    'ubCompile': '<ubCompile> is gone; Forge compiles what it emitted.',
+    'ubRegister': "<ubRegister> is gone. A file Forge did not write can "
+                  "define any name, which is the cross-file collision "
+                  "per-class emission exists to remove. Use <ubBuildBlock> "
+                  "or <ubBuildStyle>.",
+}
 
 def parseManifest(filePath, fileBytes):
     try:
@@ -150,12 +152,9 @@ def parseManifest(filePath, fileBytes):
             _parseRequires(m, child)
         elif child.tag == 'build':
             m.builds.append(_parseBuild(m, child))
-        elif child.tag == 'ubBuild':
-            m.builds.extend(_parseUbBuild(m, child))
-        elif child.tag == 'ubCompile':
-            m.compiles.append(_parseCompile(m, child))
-        elif child.tag == 'ubRegister':
-            m.builds.append(_parseUbRegister(m, child))
+        elif child.tag in _REMOVED_VERBS:
+            raise ManifestError('%s: %s' % (m.modName,
+                                            _REMOVED_VERBS[child.tag]))
         elif child.tag == 'ubBuildBlock':
             m.definitions.append(_parseDefinition(m, child, 'block'))
         elif child.tag == 'ubBuildStyle':
@@ -165,7 +164,7 @@ def parseManifest(filePath, fileBytes):
         else:
             logInfo('%s: ignoring unknown element <%s>' % (m.modName, child.tag))
 
-    if not m.builds and not m.compiles and not m.definitions:
+    if not m.builds and not m.definitions:
         logInfo('%s: manifest has nothing to build' % m.modName)
 
     return m
@@ -306,52 +305,6 @@ _ACTION_PARSERS = {
     'copy': _parseCopy,
 }
 
-def _parseCompile(m, node):
-    _warnUnknown(node, _KNOWN_COMPILE_ATTRS, 'ubCompile attribute', m.modName)
-    c = CompileSpec()
-    c.out = node.get('out')
-    if not c.out:
-        raise ManifestError("%s: <ubCompile> requires `out`" % m.modName)
-    source = node.get('source')
-    if source:
-        c.sources.append(source.strip())
-    for child in node:
-        if child.tag == 'source':
-            _warnUnknown(child, _KNOWN_SOURCE_ATTRS, 'source attribute',
-                         m.modName)
-            f = child.get('file')
-            if not f:
-                raise ManifestError("%s: <source> requires `file`" % m.modName)
-            c.sources.append(f.strip())
-        else:
-            logInfo('%s: ignoring unknown <ubCompile> child <%s>'
-                    % (m.modName, child.tag))
-    if not c.sources:
-        raise ManifestError("%s: <ubCompile out='%s'> has no source"
-                            % (m.modName, c.out))
-    return c
-
-def _parseUbBuild(m, node):
-    _warnUnknown(node, _KNOWN_UB_BUILD_ATTRS, 'ubBuild attribute', m.modName)
-    name = _payloadName(m, node, 'ubBuild')
-    autoCompile = _boolAttr(node.get('autoCompile'), True)
-
-    b = BuildSpec()
-    b.file = PAYLOAD_DIR + name + '.xml'
-    b.root = 'ui'
-    b.actions = _parseNested(m, node, "<ubBuild name='%s'>" % name)
-    if not b.actions:
-        raise ManifestError("%s: <ubBuild name='%s'> has nothing to assemble"
-                            % (m.modName, name))
-
-    if autoCompile:
-        c = CompileSpec()
-        c.out = PAYLOAD_DIR + name + '.swf'
-        c.sources.append(b.file)
-        m.compiles.append(c)
-
-    return [b, _ussRegistration(name, autoCompile)]
-
 DEFINITION_VERBS = {'block': 'ubBuildBlock', 'css': 'ubBuildStyle'}
 DEFINITION_DIRS = {'block': PAYLOAD_DIR, 'css': PAYLOAD_DIR + 'css/'}
 USS_DEFINITION_DIRS = {'block': USS_PAYLOAD_DIR,
@@ -436,17 +389,6 @@ def registrationBuild(xmlPaths, swfPath=None):
     b.actions.append(a)
     return b
 
-def _parseUbRegister(m, node):
-    _warnUnknown(node, _KNOWN_UB_REGISTER_ATTRS, 'ubRegister attribute',
-                 m.modName)
-    name = _payloadName(m, node, 'ubRegister')
-    return _ussRegistration(name, _boolAttr(node.get('swf'), True))
-
-def _ussRegistration(name, withSwf):
-    return registrationBuild(
-        [USS_PAYLOAD_DIR + name + '.xml'],
-        USS_PAYLOAD_DIR + name + '.swf' if withSwf else None)
-
 def _parseUbMountInBattle(m, node):
     _warnUnknown(node, _KNOWN_UB_MOUNT_ATTRS, 'ubMountInBattle attribute',
                  m.modName)
@@ -506,17 +448,6 @@ def _textElement(tag, text):
 
 _TAG_RE = re.compile(r'^[A-Za-z_][\w.-]*$')
 _NAME_RE = re.compile(r'^[A-Za-z0-9_.-]+$')
-
-def _payloadName(m, node, label):
-    name = node.get('name')
-    if not name:
-        raise ManifestError('%s: <%s> requires `name`' % (m.modName, label))
-    name = name.strip()
-    if not _NAME_RE.match(name):
-        raise ManifestError("%s: <%s name='%s'> may only use letters, digits, "
-                            "dot, dash and underscore" % (m.modName, label,
-                                                          name))
-    return name
 
 def _boolAttr(value, default):
     if value is None:

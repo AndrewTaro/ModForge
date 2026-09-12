@@ -58,57 +58,52 @@ A `<build>` names one game file and lists the edits to make to it. Every path is
 
 ### An Unbound 1 mod, whole
 
-An Unbound 1 mod is three things: a markup `.xml`, a `.swf` holding every `value=` expression in
-that markup compiled, and an entry in `gui/uss_settings.xml` so the client loads the pair.
-`<ubBuild>` is all three:
+An Unbound 1 mod redefines a **definition** — a `<block className=>` in
+`gui/unbound/markup.xml`, or a `<css name=>` in `gui/unbound/styles.xml`. Name the one you edit
+and list the changes:
 
 ```xml
 <mod name="My Mod" version="1.0.0">
-  <ubBuild name="MyMod">
-    <copy from="gui/unbound/markup.xml" select="block[@className='PortSwitcher']" into=".">
-      <setAttribute attribute="className" to="MyPortSwitcher"/>
-    </copy>
-  </ubBuild>
+  <ubBuildBlock name="PortSwitcher">
+    <setAttribute select=".//bind[@name='text']" attribute="value" to="'Hello'"/>
+  </ubBuildBlock>
+
+  <ubBuildStyle name="$BattleLoadingHeader">
+    <setAttribute select="./fontSize" attribute="value" to="21"/>
+  </ubBuildStyle>
 </mod>
 ```
 
-That writes `gui/unbound/mods/MyMod.xml`, compiles `gui/unbound/mods/MyMod.swf` from it, and
-registers both. `name` fixes all three paths, so there is nothing to keep in sync. Add
-`autoCompile="false"` if your mod is markup only — the `<swffile>` line then goes away too, which
-matters: a registration naming a file nothing produces hangs the client at boot.
+You name the definition; ModForge decides the file, the compile and the registration. Selectors
+inside are written against the definition itself: `.` is it, `./x` its own children, `.//x`
+anything inside it.
 
-Ship only what is yours. The build is cached on its inputs, so it runs once and then only when
-something it reads changes; the outputs are deleted when the mod is removed.
+The point of naming the definition rather than a file: **two mods editing the same one merge.**
+Each contributes its own edits to one document, so you get both, instead of two files racing to
+define the same name with the last one loaded winning. If two mods change the same attribute, the
+run says so.
 
-If your markup will not compile, that mod alone is skipped and the reason is in `python.log`. One
-error is worth knowing about in advance: the client blanks six identifiers in the constant pool of
-any unsigned `.swf`, so an expression containing `ExternalInterface`, `GameDelegate`,
-`GameInfoHolder`, `InputDelegate`, `gameInfoHolder`, `getDefinitionByName` — **or any leading part
-of one**, down to a single letter — is refused rather than shipped in a form that would silently
-misbehave.
+The baseline is sliced out of the build the player is running, every launch, so nothing in your
+mod is a frozen copy of vanilla. A name the build no longer defines is reported; a name it never
+defined is created from empty, and the run counts those separately (`4 overridden, 1 created`) —
+which is your only signal for a typo.
 
-### Copying vanilla instead of pasting it
+If your markup will not compile, that definition alone is dropped and the reason is in
+`python.log`. One error is worth knowing about in advance: the client blanks six identifiers in
+the constant pool of any unsigned `.swf`, so an expression containing `ExternalInterface`,
+`GameDelegate`, `GameInfoHolder`, `InputDelegate`, `gameInfoHolder`, `getDefinitionByName` — **or
+any leading part of one**, down to a single letter — is refused rather than shipped in a form that
+would silently misbehave.
 
-An Unbound 1 mod normally works by redefining a vanilla `<block className="…">` — which means
-pasting the whole block into your markup and changing a line or two. That copy is frozen at the
-version you pasted it from, and every game update silently stales it.
+### Pulling in another definition
 
-`<copy from="…">` takes the block out of the build the player is running, every launch:
+`<copy from="…">` takes an element out of a vanilla file and puts it in the one being built:
 
 ```xml
-<ubBuild name="MyMod">
-  <copy from="gui/unbound/markup.xml" select="block[@className='PortSwitcher']" into=".">
-    <setAttribute attribute="className" to="MyPortSwitcher"/>
-    <setAttribute select="block/block[@type='text']/bind[@name='text']"
-                  attribute="value" to="'Hello'"/>
-  </copy>
-  <copy from="gui/unbound/styles.xml" select="css[@name='PortSwitcherPreset']" into="."/>
-</ubBuild>
+<ubBuildBlock name="MyPortSwitcher">
+  <copy from="gui/unbound/markup.xml" select="block[@className='PortSwitcher']/style" into="."/>
+</ubBuildBlock>
 ```
-
-Nothing in the mod is a copy of vanilla any more. After a game update the block is re-cut and the
-`.swf` rebuilt on the next launch, and if the block — or anything your selectors name — is gone,
-that mod is skipped with the reason in `python.log` rather than shipping a stale duplicate.
 
 - `from=` is any vanilla file. `gui/unbound/markup.xml` holds the `<block className=>`
   definitions, `gui/unbound/styles.xml` the `<css name=>` ones; the two are disjoint.
@@ -116,16 +111,9 @@ that mod is skipped with the reason in `python.log` rather than shipping a stale
   declares directly under `<ui>`. A name that only exists nested inside another is not
   addressable, and if a build ever declares the same one twice the copy is refused rather than
   guessing between them. Further steps reach inside it: `block[@className='X']/style`.
-- `into="."` puts the copy at the root of the file being built. Children of `<copy>` are actions
-  on the copy itself, so a `<setAttribute>` with no `select=` renames its root — which is how you
-  publish vanilla's definition under your own name instead of overriding the original. Their
-  selectors are relative to the copy, and `.//` reaches anywhere inside it:
-  ```xml
-  <copy from="gui/unbound/markup.xml" select="block[@className='PortSwitcher']" into=".">
-    <remove select=".//bind[@name='scaleX']"/>
-  </copy>
-  ```
-- Without `from=`, `<copy>` clones from the file being edited rather than another one.
+- Children of `<copy>` are actions on the copy itself, with selectors relative to it, so a
+  `<setAttribute>` with no `select=` rewrites its root attribute.
+- Without `from=`, `<copy>` clones from the document being built rather than another file.
 
 ### Showing it in battle
 
@@ -146,33 +134,24 @@ and is **required** — the two are written differently in all three places that
 | controller | written — without it the element is listed and never constructed | none |
 
 There is no default and no guess. ModForge cannot tell the two apart from the id: an Unbound 1
-root is a `<block>` in your own payload, which for a `<ubBuild>` mod does not exist yet when the
-macro expands. Naming the wrong one produces a well-formed entry that simply never renders.
+root is a `<block>` in your own payload, which does not exist yet when the macro expands. Naming the wrong one produces a well-formed entry that simply never renders.
 
 `name=` is the instance name the client uses internally and defaults to `rootElementId`;
 `hitTest="false"` opts out of mouse hit-testing, worth doing for anything purely decorative.
 `url=` is accepted and passed through, but an Unbound element does not need one — vanilla's own
 Unbound 1 entries carry none — so leave it out unless you know otherwise.
 
-### Registering a payload you already built
-
-If you ship a precompiled `.xml`/`.swf` pair, put it in `gui/unbound/mods/` and register it:
-
-```xml
-<ubRegister name="MyMod"/>            <!-- swf="false" for markup only -->
-```
-
-`<ubBuild>` does this for you; `<ubRegister>` is for the mods that do not use it.
-
 ### The primitives
 
-`<ubBuild>`, `<ubRegister>` and `<ubMountInBattle>` are shorthand. Underneath there are two:
+`<ubBuildBlock>`, `<ubBuildStyle>` and `<ubMountInBattle>` sit on top of one thing:
 
 | Element | Does |
 |---|---|
 | `<build file="…">` | Edit a vanilla file, starting from its pristine copy. |
 | `<build file="…" root="ui">` | Generate a new file, starting from an empty `<ui>` document. |
-| `<ubCompile out="…" source="…"/>` | Compile markup into a `.swf`. Repeat `<source file="…"/>` as children to compile several files into one. |
+
+`<build file=>` is for the vanilla files no definition-keyed verb covers — `gui/battle_layout.xml`
+and the like.
 
 ### Selectors
 
