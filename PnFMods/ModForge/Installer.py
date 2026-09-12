@@ -211,6 +211,7 @@ def _runBuilds(manifests, recorded, stamps, tx):
     # absPath -> staged bytes, so a compile can read a payload generated in
     # this same run, before any of it has reached disk.
     pending = {}
+    emittedXml = []
     for m in manifests:
         for spec in m.builds:
             if not spec.root:
@@ -219,7 +220,7 @@ def _runBuilds(manifests, recorded, stamps, tx):
             try:
                 built[spec.file] = _runOneGenerated(m, spec, sources,
                                                     recorded, stamps, tx,
-                                                    pending)
+                                                    pending, emittedXml)
             except Exception as exc:
                 logError("'%s' cannot generate %s: %s"
                          % (m.modName, spec.file, exc))
@@ -229,12 +230,15 @@ def _runBuilds(manifests, recorded, stamps, tx):
     try:
         registration = _runDefinitions(survivors, sources, recorded, stamps,
                                        tx, pending, built, declared,
-                                       failedNames)
+                                       failedNames, emittedXml)
     except Exception as exc:
         # Nothing registered beats a traceback that installs no mod at all.
         logError('the definitions could not be built (%s: %s); none of them '
                  'are registered' % (type(exc).__name__, exc))
         registration = None
+
+    for problem in Validate.duplicateDefinitions(emittedXml):
+        logError(problem)
     return built, failedNames, declared, sources, registration
 
 class _Definition(object):
@@ -242,7 +246,7 @@ class _Definition(object):
                  'contributors')
 
 def _runDefinitions(manifests, sources, recorded, stamps, tx, pending, built,
-                    declared, failedNames):
+                    declared, failedNames, emittedXml):
     """One XML per definition merged across every mod that names it, and one
     shared SWF over all of them. Returns what to register, or None."""
     import Definitions
@@ -271,6 +275,7 @@ def _runDefinitions(manifests, sources, recorded, stamps, tx, pending, built,
         del pending[absPath]
     for d in kept:
         declared.add(d.relPath)
+        emittedXml.append((d.relPath, d.data))
         _stageDefinition(d, recorded, stamps, tx, built)
 
     if not kept:
@@ -404,7 +409,8 @@ def _stageDefinitionsSwf(swf, sourcePaths, pending, recorded, tx, built,
         return
     tx.stage(absPath, str(swf))
 
-def _runOneGenerated(m, spec, sources, recorded, stamps, tx, pending):
+def _runOneGenerated(m, spec, sources, recorded, stamps, tx, pending,
+                     emittedXml):
     import Build
     outPath = Paths.resolveResModsTarget(spec.file)
     if outPath is None:
@@ -421,6 +427,7 @@ def _runOneGenerated(m, spec, sources, recorded, stamps, tx, pending):
     # test_a_changed_vanilla_block_regenerates_and_recompiles pins), so the
     # document has to be built to know whether it still matches.
     pending[outPath] = data
+    emittedXml.append((spec.file, data))
     previous = recorded.get(spec.file)
     if (previous and previous[0] == stamp and Guard.stampHolds(spec.file, stamps)):
         return (stamp, m.modName)

@@ -201,6 +201,45 @@ def _validateElementRow(el, name, resolveRef):
 _UNBOUND2_REL = 'gui/unbound2'
 _NAME_CACHE_FILE = 'unbound2Names.txt'
 
+_DEFINITION_KEYS = (('block', 'className'), ('css', 'name'))
+
+def duplicateDefinitions(emitted):
+    """Top-level definitions more than one emitted file declares.
+
+    Read from `UbBlockFactory.loadPlansFromXml`, build 13187581: both loops
+    are E4X CHILD accessors (`xml.css`, `xml.block`, not `xml..block`), so
+    ONLY a top-level definition becomes a plan -- a nested <block className=>
+    is an inline child and nothing else. Registration is then a bare
+    `xmlElementPlans[name] = plan` over every registered file in load order,
+    so a second declaration of the same name silently replaces the first and
+    nothing is logged. Which one wins is load order, which the author does
+    not control.
+
+    `emitted` is (relPath, bytes) for each XML this run wrote."""
+    import BlockSlice
+    seen = {}
+    problems = []
+    for relPath, data in emitted:
+        if not relPath.lower().endswith('.xml'):
+            continue
+        for tag, attr in _DEFINITION_KEYS:
+            index = BlockSlice.top_level_index(data, tag, attr)
+            for name, span in index.items():
+                if span is None:
+                    problems.append(
+                        "%s declares <%s %s='%s'> twice; the later one wins "
+                        "and the earlier is dead" % (relPath, tag, attr, name))
+                seen.setdefault((tag, attr, name), []).append(relPath)
+    for key in sorted(seen):
+        tag, attr, name = key
+        files = sorted(set(seen[key]))
+        if len(files) > 1:
+            problems.append(
+                "<%s %s='%s'> is declared by %s; whichever loads last wins "
+                "and the rest are dead, with nothing logged in game"
+                % (tag, attr, name, ', '.join(files)))
+    return problems
+
 def unbound2ElementNames():
     modNames = _modElementNames()
     vanillaNames = _vanillaElementNames()
