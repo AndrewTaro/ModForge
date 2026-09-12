@@ -23,6 +23,7 @@ class Manifest(object):
         'modRequirements',
         'builds',
         'compiles',
+        'definitions',
         'sourcePath',
         'sourceHash',
     )
@@ -35,8 +36,17 @@ class Manifest(object):
         self.modRequirements = []
         self.builds = []
         self.compiles = []
+        self.definitions = []
         self.sourcePath = None
         self.sourceHash = None
+
+class DefinitionSpec(object):
+    __slots__ = ('namespace', 'name', 'actions')
+
+    def __init__(self):
+        self.namespace = None
+        self.name = None
+        self.actions = []
 
 class BuildSpec(object):
     __slots__ = ('file', 'root', 'guards', 'actions')
@@ -103,6 +113,7 @@ _KNOWN_GUARD_ATTRS = set(['ifExists', 'ifNotExists'])
 _KNOWN_COMPILE_ATTRS = set(['out', 'source'])
 _KNOWN_SOURCE_ATTRS = set(['file'])
 _KNOWN_UB_BUILD_ATTRS = set(['name', 'autoCompile'])
+_KNOWN_DEFINITION_ATTRS = set(['name'])
 _KNOWN_UB_REGISTER_ATTRS = set(['name', 'swf'])
 _KNOWN_UB_MOUNT_ATTRS = set(['unbound', 'rootElementId', 'name', 'hitTest',
                              'url'])
@@ -145,12 +156,16 @@ def parseManifest(filePath, fileBytes):
             m.compiles.append(_parseCompile(m, child))
         elif child.tag == 'ubRegister':
             m.builds.append(_parseUbRegister(m, child))
+        elif child.tag == 'ubBuildBlock':
+            m.definitions.append(_parseDefinition(m, child, 'block'))
+        elif child.tag == 'ubBuildStyle':
+            m.definitions.append(_parseDefinition(m, child, 'css'))
         elif child.tag == 'ubMountInBattle':
             m.builds.append(_parseUbMountInBattle(m, child))
         else:
             logInfo('%s: ignoring unknown element <%s>' % (m.modName, child.tag))
 
-    if not m.builds and not m.compiles:
+    if not m.builds and not m.compiles and not m.definitions:
         logInfo('%s: manifest has nothing to build' % m.modName)
 
     return m
@@ -337,16 +352,82 @@ def _parseUbBuild(m, node):
 
     return [b, _ussRegistration(name, autoCompile)]
 
-def _parseUbRegister(m, node):
-    _warnUnknown(node, _KNOWN_UB_REGISTER_ATTRS, 'ubRegister attribute',
-                 m.modName)
-    name = _payloadName(m, node, 'ubRegister')
-    return _ussRegistration(name, _boolAttr(node.get('swf'), True))
+DEFINITION_VERBS = {'block': 'ubBuildBlock', 'css': 'ubBuildStyle'}
+DEFINITION_DIRS = {'block': PAYLOAD_DIR, 'css': PAYLOAD_DIR + 'css/'}
+USS_DEFINITION_DIRS = {'block': USS_PAYLOAD_DIR,
+                       'css': USS_PAYLOAD_DIR + 'css/'}
 
-def _ussRegistration(name, withSwf):
-    payload = [_textElement('xmlfile', USS_PAYLOAD_DIR + name + '.xml')]
-    if withSwf:
-        payload.append(_textElement('swffile', USS_PAYLOAD_DIR + name + '.swf'))
+# A definition name is used verbatim: every one of the 2,030 names vanilla
+# defines is already safe, `$Preset` included, and a readable file is worth
+# more than a uniform one. Escaping is the fallback for a name that would
+# otherwise build a path or an illegal filename.
+_FILE_SAFE = set('abcdefghijklmnopqrstuvwxyz'
+                 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-$')
+# `markup`/`styles` are ref:uss-splice. The rest are Windows device names,
+# which are reserved WITH any extension -- `CON.xml` cannot be created at all.
+_RESERVED_STEMS = ('markup', 'styles', 'con', 'prn', 'aux', 'nul')
+_RESERVED_PREFIXES = ('com', 'lpt')
+
+def definitionFile(namespace, name):
+    if isinstance(name, unicode):
+        name = name.encode('utf-8')
+    out = []
+    for ch in name:
+        out.append(ch if ch in _FILE_SAFE else '%%%02X' % ord(ch))
+    stem = ''.join(out)
+    if _isReservedStem(stem):
+        stem = '%%%02X%s' % (ord(stem[0]), stem[1:])
+    return DEFINITION_DIRS[namespace] + stem + '.xml'
+
+def _isReservedStem(stem):
+    low = stem.lower()
+    if low in _RESERVED_STEMS:
+        return True
+    return (len(low) == 4 and low[:3] in _RESERVED_PREFIXES
+            and low[3] in '123456789')
+
+def ussDefinitionPath(namespace, name):
+    return (USS_DEFINITION_DIRS[namespace]
+            + definitionFile(namespace, name).rsplit('/', 1)[1])
+
+def _parseDefinition(m, node, namespace):
+    label = DEFINITION_VERBS[namespace]
+    _warnUnknown(node, _KNOWN_DEFINITION_ATTRS, '%s attribute' % label,
+                 m.modName)
+    name = node.get('name')
+    name = name.strip() if name else ''
+    if not name:
+        raise ManifestError('%s: <%s> requires `name`' % (m.modName, label))
+
+    d = DefinitionSpec()
+    d.namespace = namespace
+    d.name = name
+    context = "<%s name='%s'>" % (label, name)
+    for child in node:
+        if child.tag == 'guard':
+            raise ManifestError(
+                '%s: %s cannot carry a <guard>; a definition is assembled from '
+                'the vanilla one when it exists and from nothing when it does '
+                'not' % (m.modName, context))
+        action = _parseAction(m, child, context)
+        if action is not None:
+            d.actions.append(action)
+    if not d.actions:
+        raise ManifestError('%s: %s has nothing to change'
+                            % (m.modName, context))
+    return d
+
+# One shared SWF over every definition, not one each. Measured in-client:
+# ~33 ms per registered swffile against ~6.8 ms per xmlfile, and a per-file
+# SWF buys no failure isolation -- every fatal mode in the loader stalls the
+# whole boot. See PER_CLASS_PLAN.md section 4.
+DEFINITIONS_SWF = PAYLOAD_DIR + 'ForgeDefinitions.swf'
+USS_DEFINITIONS_SWF = USS_PAYLOAD_DIR + 'ForgeDefinitions.swf'
+
+def registrationBuild(xmlPaths, swfPath=None):
+    payload = [_textElement('xmlfile', p) for p in xmlPaths]
+    if swfPath:
+        payload.append(_textElement('swffile', swfPath))
     a = ActionSpec('insert')
     a.into = 'mods'
     a.payload = payload
@@ -354,6 +435,17 @@ def _ussRegistration(name, withSwf):
     b.file = USS_SETTINGS
     b.actions.append(a)
     return b
+
+def _parseUbRegister(m, node):
+    _warnUnknown(node, _KNOWN_UB_REGISTER_ATTRS, 'ubRegister attribute',
+                 m.modName)
+    name = _payloadName(m, node, 'ubRegister')
+    return _ussRegistration(name, _boolAttr(node.get('swf'), True))
+
+def _ussRegistration(name, withSwf):
+    return registrationBuild(
+        [USS_PAYLOAD_DIR + name + '.xml'],
+        USS_PAYLOAD_DIR + name + '.swf' if withSwf else None)
 
 def _parseUbMountInBattle(m, node):
     _warnUnknown(node, _KNOWN_UB_MOUNT_ATTRS, 'ubMountInBattle attribute',

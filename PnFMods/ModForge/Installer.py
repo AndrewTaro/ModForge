@@ -6,6 +6,7 @@ from xml.dom import minidom as _minidom
 
 from Codec import _u2
 import Guard
+import Manifest
 import Paths
 import Resources
 import Validate
@@ -60,15 +61,17 @@ def runInstaller(installerVersion):
     buildChanged = registry.get('buildId') != Paths.gameBuildId()
 
     eligible = validateRequirements(manifests, installerVersion)
+    # Sorted BEFORE anything is built: definitions merge in this order, and a
+    # dict's iteration order is the mod names' hashes.
+    eligible = topoSort(eligible)
     # Payloads commit first: reference validation and the compiler both read
     # them off disk. revertCommitted below undoes them if the registration
     # that names them never lands -- an XML registered against a SWF missing
     # its keys is a client that refuses to boot.
     payloadTx = Transaction()
-    compiled, compileFailed, declared, sources = _runBuilds(eligible,
-                                                            wasCompiled,
-                                                            recordedStamps,
-                                                            payloadTx)
+    (compiled, compileFailed, declared, sources,
+     registration) = _runBuilds(eligible, wasCompiled, recordedStamps,
+                                payloadTx)
     try:
         payloadTx.commit()
     except Exception as exc:
@@ -106,17 +109,21 @@ def runInstaller(installerVersion):
     stats.failed = len(compileFailed)
     stats.skipped = stats.discovered - len(ordered) - len(compileFailed)
 
-    targetFiles = _collectTargetFiles(ordered)
-    tx = Transaction()
-    _revertOrphanedOutputs(recordedOutputs, set(targetFiles), tx)
     applied = set()
     failed = set()
+    forgeFailed = set()
+    contributors = [(m.modName, m.builds, applied, failed) for m in ordered]
+    if registration is not None:
+        contributors.append((FORGE, [registration], set(), forgeFailed))
+
+    targetFiles = _collectTargetFiles(contributors)
+    tx = Transaction()
+    _revertOrphanedOutputs(recordedOutputs, set(targetFiles), tx)
     staged = []
 
     for relPath in targetFiles:
         try:
-            updated = _applyToTarget(relPath, ordered, applied, failed,
-                                     sources)
+            updated = _applyToTarget(relPath, contributors, sources)
         except _TargetSkipped as skip:
             logError("target '%s' skipped: %s" % (relPath, skip))
             continue
@@ -132,6 +139,10 @@ def runInstaller(installerVersion):
             continue
         tx.stage(absPath, updated)
         staged.append((relPath, updated))
+
+    if forgeFailed:
+        logError('the definitions were built but could not be registered in '
+                 '%s; the client will not load them' % Manifest.USS_SETTINGS)
 
     for m in ordered:
         if m.modName in failed:
@@ -155,6 +166,8 @@ def runInstaller(installerVersion):
     successful = [m for m in ordered if m.modName not in failed]
     return _finalize(registry, successful, stats, installerVersion,
                      Guard.outputHashes(staged), compiled)
+
+FORGE = 'ModForge'
 
 class _TargetSkipped(Exception):
     pass
@@ -219,7 +232,143 @@ def _runBuilds(manifests, recorded, stamps, tx):
                 logError("'%s' cannot build %s: %s"
                          % (m.modName, spec.out, exc))
                 failedNames.add(m.modName)
-    return built, failedNames, declared, sources
+
+    survivors = [m for m in manifests if m.modName not in failedNames]
+    registration = _runDefinitions(survivors, sources, recorded, stamps, tx,
+                                   pending, built, declared, failedNames)
+    return built, failedNames, declared, sources, registration
+
+class _Definition(object):
+    __slots__ = ('namespace', 'name', 'relPath', 'absPath', 'data', 'isNew',
+                 'contributors')
+
+def _runDefinitions(manifests, sources, recorded, stamps, tx, pending, built,
+                    declared, failedNames):
+    """One XML per definition merged across every mod that names it, and one
+    shared SWF over all of them. Returns what to register, or None."""
+    import Definitions
+    emitted, failed = _mergeDefinitions(manifests, sources)
+    failedNames |= failed
+    if not emitted:
+        return None
+
+    created = 0
+    paths = []
+    for d in emitted:
+        created += d.isNew
+        pending[d.absPath] = d.data
+        paths.append(d.absPath)
+        logInfo('%s %s, from %s'
+                % ('created' if d.isNew else 'overrode',
+                   Definitions.label(d.namespace, d.name),
+                   ', '.join(d.contributors)))
+    logInfo('%d definition(s): %d overridden, %d created'
+            % (len(emitted), len(emitted) - created, created))
+
+    dropped = set()
+    swf, count = _compileDefinitions(paths, pending, dropped)
+    for absPath in dropped:
+        del pending[absPath]
+    kept = [d for d in emitted if d.absPath not in dropped]
+    for d in kept:
+        declared.add(d.relPath)
+        _stageDefinition(d, recorded, stamps, tx, built)
+
+    swfPath = None
+    if count:
+        _stageDefinitionsSwf(swf, [d.absPath for d in kept], pending,
+                             recorded, tx, built, declared)
+        swfPath = Manifest.USS_DEFINITIONS_SWF
+    return Manifest.registrationBuild(
+        [Manifest.ussDefinitionPath(d.namespace, d.name) for d in kept],
+        swfPath)
+
+def _mergeDefinitions(manifests, sources):
+    """(emitted, failedNames), re-merged until the failed set is stable.
+
+    A mod dropped over one definition must not stay applied in another, and
+    a failure is only known once its actions have run."""
+    import Definitions
+    failed = set()
+    while True:
+        merger = Definitions.Merger(sources)
+        emitted = []
+        roundFailed = set()
+        contributing = [m for m in manifests if m.modName not in failed]
+        for key, contributions in Definitions.collect(contributing):
+            namespace, name = key
+            relPath = Manifest.definitionFile(namespace, name)
+            absPath = Paths.resolveResModsTarget(relPath)
+            if absPath is None:
+                logError('%s: output path escapes res_mods/: %s'
+                         % (Definitions.label(namespace, name), relPath))
+                continue
+            landed = set()
+            try:
+                data, isNew = merger.build(key, contributions, landed,
+                                           roundFailed)
+            except Exception as exc:
+                logError('cannot assemble %s: %s: %s'
+                         % (Definitions.label(namespace, name),
+                            type(exc).__name__, exc))
+                roundFailed.update(m.modName for m, _ in contributions)
+                continue
+            if data is not None:
+                d = _Definition()
+                (d.namespace, d.name, d.relPath, d.absPath, d.data,
+                 d.isNew) = namespace, name, relPath, absPath, data, isNew
+                d.contributors = [m.modName for m, _ in contributions
+                                  if m.modName in landed]
+                emitted.append(d)
+        if not roundFailed:
+            return emitted, failed
+        failed |= roundFailed
+
+def _compileDefinitions(paths, pending, dropped):
+    """One SWF over every definition. A definition whose expressions do not
+    parse is dropped rather than costing every other one its keys."""
+    import UssCompile
+    try:
+        return UssCompile.compileMarkup(paths, pending, allowEmpty=True)
+    except Exception as exc:
+        logError('the definitions do not compile as one (%s); compiling each '
+                 'to find which' % exc)
+    good = []
+    for absPath in paths:
+        try:
+            UssCompile.compileMarkup([absPath], pending, allowEmpty=True)
+        except Exception as exc:
+            logError('%s: dropped, its expressions do not compile: %s'
+                     % (absPath, exc))
+            dropped.add(absPath)
+            continue
+        good.append(absPath)
+    if not good:
+        return None, 0
+    return UssCompile.compileMarkup(good, pending, allowEmpty=True)
+
+def _stageDefinition(d, recorded, stamps, tx, built):
+    stamp = Paths.hashBytes(d.data)
+    built[d.relPath] = (stamp, ', '.join(d.contributors))
+    previous = recorded.get(d.relPath)
+    if (previous and previous[0] == stamp
+            and Guard.stampHolds(d.relPath, stamps)):
+        return
+    if Paths.hashFile(d.absPath) != stamp:
+        tx.stage(d.absPath, d.data)
+
+def _stageDefinitionsSwf(swf, sourcePaths, pending, recorded, tx, built,
+                         declared):
+    relPath = Manifest.DEFINITIONS_SWF
+    declared.add(relPath)
+    absPath = Paths.resolveResModsTarget(relPath)
+    stamp = Paths.hashBytes(''.join(
+        [_COMPILER_STAMP] + [_sourceHash(p, pending) for p in sourcePaths]))
+    built[relPath] = (stamp, 'definitions')
+    previous = recorded.get(relPath)
+    if previous and previous[0] == stamp and Paths.fileExists(absPath):
+        return
+    tx.stage(absPath, str(swf))
 
 def _runOneGenerated(m, spec, sources, recorded, stamps, tx, pending):
     import Build
@@ -324,11 +473,11 @@ def _dropOrphanedCompiles(recorded, declaredPaths):
         logInfo("removed %s; '%s' no longer builds it"
                 % (relPath, recorded[relPath][1]))
 
-def _collectTargetFiles(orderedManifests):
+def _collectTargetFiles(contributors):
     seen = []
     seenSet = set()
-    for m in orderedManifests:
-        for t in m.builds:
+    for _label, builds, _applied, _failed in contributors:
+        for t in builds:
             if t.root:
                 continue
             if t.file not in seenSet:
@@ -336,8 +485,10 @@ def _collectTargetFiles(orderedManifests):
                 seen.append(t.file)
     return seen
 
-def _applyToTarget(relPath, orderedManifests, appliedOut, failedOut,
-                   sources):
+def _applyToTarget(relPath, contributors, sources):
+    """`contributors` is (label, builds, appliedOut, failedOut) in apply
+    order. Forge's own entries ride in as one of them, with sets of its own
+    so its name can never be confused with a mod's."""
     pristine = Resources.loadPristine(relPath)
     if pristine is None:
         raise _TargetSkipped('cannot fetch pristine copy')
@@ -348,8 +499,8 @@ def _applyToTarget(relPath, orderedManifests, appliedOut, failedOut,
         raise _TargetSkipped('pristine is not valid XML: %s' % exc)
 
     mutated = False
-    for m in orderedManifests:
-        targets = [t for t in m.builds
+    for label, builds, appliedOut, failedOut in contributors:
+        targets = [t for t in builds
                    if not t.root and t.file == relPath]
         if not targets:
             continue
@@ -360,21 +511,21 @@ def _applyToTarget(relPath, orderedManifests, appliedOut, failedOut,
             for tspec in targets:
                 if not evaluateGuards(doc.documentElement, tspec.guards):
                     logInfo("'%s' guard blocks edits to %s"
-                            % (m.modName, relPath))
+                            % (label, relPath))
                     continue
                 for action in tspec.actions:
                     logInfo("'%s': %s on %s"
-                            % (m.modName, action.kind, relPath))
-                    if applyAction(doc, action, m.modName, None, sources):
+                            % (label, action.kind, relPath))
+                    if applyAction(doc, action, label, None, sources):
                         edited = True
 
             if edited:
                 mutated = True
-                appliedOut.add(m.modName)
+                appliedOut.add(label)
         except Exception as exc:
             logError("'%s' failed on %s: %s: %s"
-                     % (m.modName, relPath, type(exc).__name__, exc))
-            failedOut.add(m.modName)
+                     % (label, relPath, type(exc).__name__, exc))
+            failedOut.add(label)
 
             doc.unlink()
             doc = snapshot

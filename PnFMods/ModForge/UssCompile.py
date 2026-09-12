@@ -28,9 +28,14 @@ def censoredStrings(poolStrings):
                 break
     return hits
 
-def compileMarkup(absXmlPaths, contents=None):
+def compileMarkup(absXmlPaths, contents=None, allowEmpty=False):
     """`contents` supplies a source that is staged but not yet on disk, so a
-    payload and the SWF built from it can land in one commit."""
+    payload and the SWF built from it can land in one commit.
+
+    `allowEmpty` returns (None, 0) for sources that carry no expression at
+    all, instead of raising. A mod naming a source it meant to compile wants
+    the error; Forge's own definitions are simply not all expression-bearing
+    -- and a registered SWF with no expressions stalls the boot."""
     abcFmt, ussBuild, ussSwf, ussTrans, ussXml = _modules()
 
     staged = contents or {}
@@ -49,6 +54,8 @@ def compileMarkup(absXmlPaths, contents=None):
         ussXml.scan_element(root, collector)
 
     entries = collector.entries()
+    if allowEmpty and not entries:
+        return None, 0
     abc = ussBuild.build_abc(entries)
 
     # ref:uss-censor
