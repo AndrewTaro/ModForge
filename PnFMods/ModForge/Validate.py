@@ -355,10 +355,20 @@ def _walkFiles(root, suffix):
                 out.append(base + name)
     return out
 
+# A battle_elements `elementName=` may name either form. Measured on build
+# 13187581: of vanilla's own 18, `MarkersContainer` and `SpeedControl` are
+# `(def layout ...)` and the other 16 are `(def element ...)`. Scanning only
+# for the latter reports two stock entries as broken, every run.
+_DEF_FORMS = ('(def element', '(def layout')
+
 def _defElementNames(data):
     out = []
+    for needle in _DEF_FORMS:
+        _scanDefs(data, needle, out)
+    return out
+
+def _scanDefs(data, needle, out):
     idx = 0
-    needle = '(def element'
     while True:
         idx = data.find(needle, idx)
         if idx < 0:
