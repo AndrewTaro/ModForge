@@ -134,6 +134,24 @@ would silently misbehave.
   `<setAttribute>` with no `select=` rewrites its root attribute.
 - Without `from=`, `<copy>` clones from the document being built rather than another file.
 
+**To publish a vanilla definition under your own name**, copy its *children* into a definition of
+the name you want — note the `/*`:
+
+```xml
+<ubBuildBlock name="MyPortSwitcher">
+  <copy from="gui/unbound/markup.xml" select="block[@className='PortSwitcher']/*" into="."/>
+  <setAttribute select=".//bind[@name='text']" attribute="value" to="'Mine'"/>
+</ubBuildBlock>
+```
+
+Nothing is lost by taking the children rather than the block: every top-level vanilla definition
+carries `className` and no other attribute, and your verb supplies the name.
+
+Copying the block itself (`select="block[@className='PortSwitcher']"`, without `/*`) does not
+rename it — it **nests** it, so your definition ends up with the vanilla block as its only child
+and renders one layout level deeper than you meant. It will not error; check the emitted file if
+the layout looks off by a container.
+
 ### Showing it in battle
 
 A registered definition is loaded by the client; that alone does not put anything on screen in
