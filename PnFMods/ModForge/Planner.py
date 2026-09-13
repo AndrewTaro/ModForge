@@ -157,6 +157,69 @@ def _candidateRelPaths(candidate):
             out.append(relPath)
     return out
 
+# Never empty, whatever the derivation below manages. An allowlist that
+# silently degrades to "permit everything" is the shape that leaked three
+# times in link_mods.py.
+_ALWAYS_OWNED = (manifestMod.USS_SETTINGS, manifestMod.VANILLA_MARKUP,
+                 manifestMod.VANILLA_STYLES)
+
+_INSTEAD = {
+    manifestMod.VANILLA_MARKUP: "edit the definition with <ubBuildBlock name='...'>",
+    manifestMod.VANILLA_STYLES: "edit the preset with <ubBuildStyle name='...'>",
+    manifestMod.USS_SETTINGS: ("ModForge registers what it emits; declare the "
+                               "definitions with <ubBuildBlock name='...'> or "
+                               "<ubBuildStyle name='...'> instead"),
+}
+
+def unboundOwnedTargets():
+    """Every file Unbound 1 owns, taken from vanilla's own `<default>` block.
+
+    Derived rather than listed so a file WG adds to `<default>` in a future
+    build is covered without anyone editing anything -- the hand-maintained
+    version of this list is what leaked repeatedly elsewhere."""
+    owned = set(_ALWAYS_OWNED)
+    data = Resources.loadPristine(manifestMod.USS_SETTINGS)
+    if data is None:
+        logError('cannot read vanilla %s; falling back to the built-in list of '
+                 'Unbound-owned files' % manifestMod.USS_SETTINGS)
+        return owned
+    try:
+        root = manifestMod._u2.fromstring(data)
+    except Exception as exc:
+        logError('vanilla %s does not parse (%s); falling back to the built-in '
+                 'list of Unbound-owned files' % (manifestMod.USS_SETTINGS, exc))
+        return owned
+    for default in root.findall('default'):
+        for entry in default:
+            text = (entry.text or '').strip()
+            if not text:
+                continue
+            rel = resolveReference(text)
+            if rel:
+                owned.add(rel)
+    return owned
+
+def validateTargets(m, owned):
+    """A mod may not write what Unbound owns.
+
+    Refusing the whole mod, not just that one `<build>`: its payload would
+    otherwise be written and never loaded, which is a mod that looks
+    installed and does nothing."""
+    for t in m.builds:
+        rel = t.file
+        if rel in owned:
+            logError("'%s' writes %s, which Unbound owns -- %s. Skipping it."
+                     % (m.modName, rel,
+                        _INSTEAD.get(rel, "use a definition verb")))
+            return False
+        if rel.startswith(manifestMod.PAYLOAD_DIR):
+            logError("'%s' writes %s, which is ModForge's own output "
+                     "directory -- declare the definition with "
+                     "<ubBuildBlock name='...'> or <ubBuildStyle name='...'> "
+                     "and it picks the file. Skipping it." % (m.modName, rel))
+            return False
+    return True
+
 def topoSort(manifests):
     byName = dict((m.modName, m) for m in manifests)
 

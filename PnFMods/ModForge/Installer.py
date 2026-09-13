@@ -14,8 +14,8 @@ from Actions import applyAction, evaluateGuards
 from Logger import logInfo, logError
 import Planner
 from Planner import (
-    discoverManifests, summarizePlan, topoSort,
-    validateFileReferences, validateRequirements,
+    discoverManifests, summarizePlan, topoSort, unboundOwnedTargets,
+    validateFileReferences, validateRequirements, validateTargets,
 )
 from Transaction import Transaction
 
@@ -65,6 +65,10 @@ def runInstaller(installerVersion):
     buildChanged = registry.get('buildId') != Paths.gameBuildId()
 
     eligible = validateRequirements(manifests, installerVersion)
+    # Before anything is built: a mod that writes what Unbound owns cannot
+    # work, and its payload would otherwise be generated and then ignored.
+    owned = unboundOwnedTargets()
+    eligible = [m for m in eligible if validateTargets(m, owned)]
     # Sorted BEFORE anything is built: definitions merge in this order, and a
     # dict's iteration order is the mod names' hashes.
     eligible = topoSort(eligible)

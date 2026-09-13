@@ -191,6 +191,16 @@ Unbound 1 entries carry none — so leave it out unless you know otherwise.
 `<build file=>` is for the vanilla files no definition-keyed verb covers — `gui/battle_layout.xml`
 and the like.
 
+**It will not write what Unbound owns.** `gui/uss_settings.xml`, `gui/unbound/markup.xml`,
+`gui/unbound/styles.xml`, anything else vanilla lists in that file's `<default>` block, and
+ModForge's own output directory `gui/unbound/mods/` are all refused, and the mod is skipped with a
+message naming the verb to use instead. ModForge is the only writer of those, which is what lets
+it guarantee that every registered entry names a file it just wrote — the registered-but-missing
+entry is the one that hangs the client at boot with nothing in the log.
+
+If you ship a prebuilt `.xml`/`.swf` pair today, declare its definitions with `<ubBuildBlock>` /
+`<ubBuildStyle>` instead and drop the `.swf` — ModForge compiles one for everything it emits.
+
 ### Selectors
 
 A subset of XPath 1.0, and **everything in it means exactly what XPath means** — checked
