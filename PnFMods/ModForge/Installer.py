@@ -77,9 +77,9 @@ def runInstaller(installerVersion):
     # that names them never lands -- an XML registered against a SWF missing
     # its keys is a client that refuses to boot.
     payloadTx = Transaction()
-    (compiled, compileFailed, declared, sources,
-     registration) = _runBuilds(eligible, wasCompiled, recordedStamps,
-                                payloadTx, stats)
+    (compiled, compileFailed, declared, sources, registration,
+     definitionApplied) = _runBuilds(eligible, wasCompiled, recordedStamps,
+                                     payloadTx, stats)
     try:
         payloadTx.commit()
     except Exception as exc:
@@ -117,7 +117,10 @@ def runInstaller(installerVersion):
     stats.failed = len(compileFailed)
     stats.skipped = stats.discovered - len(ordered) - len(compileFailed)
 
-    applied = set()
+    # Seeded, not empty: a mod whose only output is a definition never
+    # touches a <build> target, so without this it lands in no bucket at all
+    # and the summary reports it as having done nothing.
+    applied = set(definitionApplied)
     failed = set()
     forgeFailed = set()
     contributors = [(m.modName, m.builds, applied, failed) for m in ordered]
@@ -235,10 +238,12 @@ def _runBuilds(manifests, recorded, stamps, tx, stats):
                 failedNames.add(m.modName)
 
     survivors = [m for m in manifests if m.modName not in failedNames]
+    definitionApplied = set()
     try:
         registration = _runDefinitions(survivors, sources, recorded, stamps,
                                        tx, pending, built, declared,
-                                       failedNames, emittedXml, stats)
+                                       failedNames, emittedXml, stats,
+                                       definitionApplied)
     except Exception as exc:
         # Nothing registered beats a traceback that installs no mod at all.
         logError('the definitions could not be built (%s: %s); none of them '
@@ -249,7 +254,8 @@ def _runBuilds(manifests, recorded, stamps, tx, stats):
         logError(problem)
     for problem in _styleProblems(emittedXml, sources):
         logError(problem)
-    return built, failedNames, declared, sources, registration
+    return (built, failedNames, declared, sources, registration,
+            definitionApplied)
 
 def _styleProblems(emittedXml, sources):
     """Gated on a use existing: resolving needs the vanilla styles index,
@@ -267,7 +273,8 @@ class _Definition(object):
                  'contributors')
 
 def _runDefinitions(manifests, sources, recorded, stamps, tx, pending, built,
-                    declared, failedNames, emittedXml, stats):
+                    declared, failedNames, emittedXml, stats,
+                    definitionApplied):
     """One XML per definition merged across every mod that names it, and one
     shared SWF over all of them. Returns what to register, or None."""
     import Definitions
@@ -300,6 +307,7 @@ def _runDefinitions(manifests, sources, recorded, stamps, tx, pending, built,
     for d in kept:
         declared.add(d.relPath)
         emittedXml.append((d.relPath, d.data))
+        definitionApplied.update(d.contributors)
         _stageDefinition(d, recorded, stamps, tx, built)
 
     if not kept:

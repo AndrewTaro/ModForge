@@ -103,7 +103,7 @@ _KNOWN_COPY_ATTRS = set(['select', 'from', 'into', 'before', 'after'])
 _KNOWN_GUARD_ATTRS = set(['ifExists', 'ifNotExists'])
 _KNOWN_DEFINITION_ATTRS = set(['name'])
 _KNOWN_UB_MOUNT_ATTRS = set(['unbound', 'rootElementId', 'name', 'hitTest',
-                             'url'])
+                             'url', 'before', 'after'])
 
 # Refused, not ignored: the unknown-element path below only logs, and a
 # blueprint that silently stops building anything is worse than one that
@@ -419,6 +419,8 @@ def _parseUbMountInBattle(m, node):
     props.set('hitTest', 'true' if _boolAttr(node.get('hitTest'), True)
               else 'false')
 
+    before, after = _mountAnchors(m, node)
+
     b = BuildSpec()
     b.file = BATTLE_ELEMENTS
     if unbound == '1':
@@ -427,7 +429,7 @@ def _parseUbMountInBattle(m, node):
     else:
         element.set('class', UNBOUND2_ELEMENT_CLASS)
         element.set('elementName', rootElementId)
-    b.actions.append(_insertInto('elementList', element))
+    b.actions.append(_insertInto('elementList', element, before, after))
     if unbound == '1':
         controller = _u2.Element('controller')
         controller.set('class', UNBOUND_CONTROLLER_CLASS)
@@ -435,9 +437,34 @@ def _parseUbMountInBattle(m, node):
         b.actions.append(_insertInto('controllers', controller))
     return b
 
-def _insertInto(container, payloadElement):
+def _mountAnchors(m, node):
+    """(before, after) selectors for a mount, from a plain element name.
+
+    Order in `elementList` is render order, so this is not cosmetic: an
+    element appended after `MarkersContainer` draws over what one placed
+    before it draws under. Without an anchor the entry lands last, which is
+    the right default and the wrong answer for anything layered.
+
+    The name is matched against `elementName`, which is what every entry the
+    game lays out carries and what every anchor in the wild names. Six of
+    vanilla's 24 entries have only `name`; anchor on one of those with
+    <build file="gui/battle_elements.xml"> instead."""
+    before = (node.get('before') or '').strip()
+    after = (node.get('after') or '').strip()
+    if before and after:
+        raise ManifestError('%s: <ubMountInBattle> takes before= or after=, '
+                            'not both' % m.modName)
+    asSelector = lambda v: "element[@elementName='%s']" % v if v else None
+    if (before or after).find("'") >= 0:
+        raise ManifestError("%s: <ubMountInBattle> anchor cannot contain a "
+                            "quote: %s" % (m.modName, before or after))
+    return asSelector(before), asSelector(after)
+
+def _insertInto(container, payloadElement, before=None, after=None):
     a = ActionSpec('insert')
     a.into = container
+    a.before = before
+    a.after = after
     a.payload = [payloadElement]
     return a
 

@@ -83,17 +83,18 @@ A `<build>` names one game file and lists the edits to make to it. Every path is
 
 ### Schema reference
 
-Everything a blueprint may contain. An unknown **element** and an unknown **attribute** are both
-ignored with an info line and nothing else — a typo is quiet, so read the log after a change.
+Every element a blueprint may contain at the top level; the five actions that go *inside* them
+are in [Actions](#actions). An unknown **element** and an unknown **attribute** are both ignored
+with an info line and nothing else — a typo is quiet, so read the log after a change.
 
 | Element | Attributes | Notes |
 |---|---|---|
-| `<mod>` | `name`\*, `version`\*, `priority` | root. `priority` defaults to 0; higher applies **earlier** |
-| `<requires installer=>` | `installer`\* | version constraint, e.g. `>=1.0.0` |
-| `<requires mod=>` | `mod`\*, `version` | both enforces order and skips your mod if that one is absent |
+| `<mod>` | `name`\*, `version`\*, `priority` | one per file. `priority` defaults to 0; higher applies **earlier** |
+| `<requires installer=>` | `installer`\* | version constraint, e.g. `>=1.0.0`. **This installer is 1.0.0.** An unmet constraint skips your mod |
+| `<requires mod=>` | `mod`\*, `version` | matches another blueprint's `<mod name=>` — so `name` is an identity key, not a label: keep it stable across renames. Enforces order, and skips your mod if that one is absent |
 | `<ubBuildBlock>` | `name`\* | a `<block className=>` in `gui/unbound/markup.xml` |
 | `<ubBuildStyle>` | `name`\* | a `<css name=>` in `gui/unbound/styles.xml` |
-| `<ubMountInBattle>` | `unbound`\*, `rootElementId`\*, `name`, `hitTest`, `url` | writes the `battle_elements.xml` entries |
+| `<ubMountInBattle>` | `unbound`\*, `rootElementId`\*, `name`, `hitTest`, `url`, `before` \| `after` | writes the `battle_elements.xml` entries |
 | `<build>` | `file`\*, `root` | edit a vanilla file; with `root=` generate a new one |
 | `<guard>` | `ifExists` \| `ifNotExists` | inside a `<build>` with no `root=`; position does not matter |
 
@@ -105,6 +106,27 @@ Names are **opaque and verbatim**. `$Foo` and `Foo` are different presets; nothi
 A definition verb may not carry a `<guard>`, and neither may a `root=` build. Both are refused
 outright rather than treated as a condition that is always false: a guard reads the document it
 edits, and those two start from a definition or from nothing.
+
+### An Unbound 2 mod, whole
+
+Unbound 2 is the current standard, and it needs almost nothing from ModForge. A view at
+`gui/unbound2/PnFMods/<YourMod>.unbound` is found by the client on its own — **no registration, no
+compile, no `.swf`, and none of the `ubBuild*` verbs**. All ModForge does is put it on screen in
+battle:
+
+```xml
+<mod name="MyMod" version="1.0.0">
+  <requires installer=">=1.0.0"/>
+  <ubMountInBattle unbound="2" rootElementId="MyMod_Container" after="MainHud"/>
+</mod>
+```
+
+`rootElementId` is the name of the `(def element …)` your `.unbound` declares. That is the whole
+blueprint for a typical Unbound 2 mod.
+
+Everything below about `<ubBuildBlock>`, `<ubBuildStyle>`, SWF compilation and `markup.xml` is
+**Unbound 1** — the older framework. You need it only if you are changing the game's own Unbound 1
+markup.
 
 ### An Unbound 1 mod, whole
 
@@ -152,11 +174,15 @@ one the game renamed in the last patch: both show up as `created` where you mean
 and the definition then renders nothing at all.
 
 If your markup will not compile, that definition alone is dropped and the reason is in
-`python.log`. One error is worth knowing about in advance: the client blanks six identifiers in
-the constant pool of any unsigned `.swf`, so an expression containing `ExternalInterface`,
-`GameDelegate`, `GameInfoHolder`, `InputDelegate`, `gameInfoHolder`, `getDefinitionByName` — **or
-any leading part of one**, down to a single letter — is refused rather than shipped in a form that
-would silently misbehave.
+`python.log`.
+
+One refusal is worth knowing about in advance. The client blanks six identifiers in the constant
+pool of any unsigned `.swf`: `ExternalInterface`, `GameDelegate`, `GameInfoHolder`,
+`InputDelegate`, `gameInfoHolder`, `getDefinitionByName`. It matches by **pool entry**, not by
+substring, and a pool entry that is a *prefix* of one of those is blanked too — so a bare
+identifier `Game`, or even `G`, is refused, while `gameplay` (not a prefix of any of them) is
+fine. Your expression's identifiers each become a pool entry; string literals and property names
+count. ModForge refuses the build rather than ship something that would silently misbehave.
 
 ### Pulling in another definition
 
@@ -218,10 +244,28 @@ There is no default and no guess. ModForge cannot tell the two apart from the id
 root is a `<block>` in a definition that has not been merged yet when the macro expands. Naming
 the wrong one produces a well-formed entry that simply never renders.
 
-`name=` is the instance name the client uses internally and defaults to `rootElementId`;
-`hitTest="false"` opts out of mouse hit-testing, worth doing for anything purely decorative.
-`url=` is accepted and passed through, but an Unbound element does not need one — vanilla's own
-Unbound 1 entries carry none — so leave it out unless you know otherwise.
+`name=` is the instance name the client uses internally and defaults to `rootElementId`. Vanilla
+gives every entry a distinct instance name (`ubMarkersContainer`, `unboundShipStateBars`), so a
+name of your own is worth setting.
+
+`hitTest=` takes `true` or `false` and **defaults to `true`**; `false` opts out of mouse
+hit-testing, worth doing for anything purely decorative. `url=` is accepted and passed through,
+but an Unbound element does not need one — vanilla's own Unbound 1 entries carry none — so leave
+it out unless you know otherwise.
+
+**Placement is render order, so set it.** `before=` and `after=` take the `elementName` of an
+existing entry:
+
+```xml
+<ubMountInBattle unbound="2" rootElementId="MyModContainer" after="MainHud"/>
+<ubMountInBattle unbound="2" rootElementId="MyOverlay" before="MarkersContainer"/>
+```
+
+Without either the entry is appended, which puts it on top of everything. Give one or the other
+unless last is genuinely what you want — an element anchored `before="MarkersContainer"` draws
+*under* the markers, and appending it instead draws it over them, with no error either way. The
+anchor matches `elementName`; six of vanilla's 24 entries have only a `name`, and to sit next to
+one of those use `<build file="gui/battle_elements.xml">` directly.
 
 ### The primitives
 
@@ -284,20 +328,23 @@ Five things that bite if you assume otherwise:
 Prefer a path plus a stable `@name` over a long value or an index where you have the choice —
 both of the latter break on the next patch, an index silently.
 
+One mod may `setAttribute` the same attribute repeatedly; the writes stack in order and the last
+one stands. The conflict rule below is between *different* mods, not within one.
+
 ### Actions
 
 The body of a `<build>` or either definition verb:
 
 | Action | Does |
 |---|---|
-| `<insert into="sel">…</insert>` | Add children into the parent (`before=`/`after=` for placement). Identical re-inserts are skipped. |
+| `<insert into="sel">…</insert>` | Add children into the parent. `before=`/`after=` place them; that selector is resolved **inside** the `into=` scope, not from the document root. Without either, children are appended. Identical re-inserts are skipped. |
 | `<remove select="sel"/>` | Delete matched nodes. |
 | `<replace select="sel">…</replace>` | Swap matched nodes for the supplied elements. |
-| `<setAttribute select="sel" attribute="a" to="v"/>` | Set attribute `a`, adding it if absent; with `from="old"`, replaces that substring instead and does nothing where it is not found. |
+| `<setAttribute select="sel" attribute="a" to="v"/>` | Set attribute `a`, adding it if absent. With `from="old"` it replaces **every** occurrence of that substring instead, and does nothing at all where the substring is absent — silently, so check your result. `select=` may be omitted, which targets the node the action is scoped to. |
 | `<copy select="sel" into="sel">…</copy>` | Clone nodes, from this file or from `from="…"`. Children are actions on the clone. |
 
-A `<guard ifExists="sel"/>` or `<guard ifNotExists="sel"/>` at the top of a `<build>` skips it
-unless the condition holds. Reach for a guard only for real conditional logic (e.g. patch differently
+A `<guard ifExists="sel"/>` or `<guard ifNotExists="sel"/>` anywhere inside a `<build>` skips the
+whole build unless the condition holds. Reach for a guard only for real conditional logic (e.g. patch differently
 depending on another mod). You don't need one to avoid installing twice: re-applying is idempotent —
 identical inserts are skipped, and an unchanged run is a no-op — so the old "skip if my element
 already exists" guard is unnecessary.
@@ -353,6 +400,20 @@ a public clone:
 py -3 notes/ModForge/payload_tools/ConvertV4.py <v4-file-or-dir> <output-dir>
 ```
 
+**Most v4 files are one `battle_elements.xml` insert**, and those convert to a single
+`<ubMountInBattle>`:
+
+| v4 | blueprint |
+|---|---|
+| `<element class="lesta.unbound2.UbElement" elementName="X">` | `<ubMountInBattle unbound="2" rootElementId="X">` |
+| `<element class="lesta.libs.unbound.UnboundElement">` + a `<controller>` | `<ubMountInBattle unbound="1" …>` — it writes the controller too |
+| `name="unbound2MyThing"` on the element | `name="unbound2MyThing"` |
+| `<properties hitTest="true"/>` | `hitTest="true"` (the default) |
+| `<position insert="after_node" … value_1="MainHud"/>` | `after="MainHud"` |
+| `<do_if_not_exist …/>` | drop it — re-applying is idempotent |
+
+**Do not drop the `<position>`.** It is render order, and losing it is silent.
+
 **What it can and cannot see.** A v4 file is an *instruction* file. Where the mod shipped a
 prebuilt `.xml`/`.swf` pair and v4 merely registered it, nothing in the instruction describes what
 that payload defines — so the converter emits a `TODO` naming the files instead of guessing. That
@@ -367,6 +428,10 @@ Finishing such a mod by hand:
 3. Express the body as edits against vanilla where you can. Where the payload is wholly the mod's
    own, `<insert into=".">` its children.
 4. Delete the `.swf`. ModForge compiles one shared SWF for everything it emits.
+
+**Checking your work.** There is no offline validator in a public clone — the test suite and the
+dry-run harness live in the author's private notes repo. Your feedback loop is booting the client
+and reading `python.log`, so [Reading the log](#reading-the-log) is the section to keep open.
 
 What the converter *does* handle mechanically: a v4 payload assembly (`<copy_past>` plus edits)
 becomes one definition verb per seeded block, because "copy vanilla X, edit it, register the file"
