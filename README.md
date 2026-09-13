@@ -8,6 +8,23 @@ build's markup.
 Usually bundled inside other mods' packs, not installed on its own. It runs once at game start,
 has no UI, and reverts every file to stock when removed.
 
+Writing a mod: start at [Writing a blueprint](#writing-a-blueprint).
+Porting one from ModsInstaller 4.3.1: start at
+[Converting a ModsInstaller 4.3.1 mod](#converting-a-modsinstaller-431-mod).
+Either way, read [Silent failures the client will not report](#silent-failures-the-client-will-not-report)
+before writing markup — most Unbound 1 mistakes have no symptom at all.
+
+## Contents
+
+- [What it does, in order](#what-it-does-in-order)
+- [Features](#features)
+- [Writing a blueprint](#writing-a-blueprint) — [schema reference](#schema-reference), [selectors](#selectors), [actions](#actions)
+- [An Unbound 1 mod, whole](#an-unbound-1-mod-whole)
+- [Reading the log](#reading-the-log)
+- [Converting a ModsInstaller 4.3.1 mod](#converting-a-modsinstaller-431-mod)
+- [Silent failures the client will not report](#silent-failures-the-client-will-not-report)
+- [Working on ModForge](#working-on-modforge)
+
 ## What it does, in order
 
 1. **Discover** every blueprint under `res_mods/ForgeBlueprints/` and `res_mods/PnFMods/*/manifest.xml`.
@@ -27,8 +44,10 @@ It skips the whole run if no blueprint, mod set, or game build changed since las
   overwriting each other. Removing a blueprint reverts its edits.
 - **Atomic.** All files commit together or roll back — never a half-written state.
 - **Isolated failure.** A mod whose edit throws is reverted alone; the rest still install.
-- **Crash-safe.** A reference that would hard-crash the client at boot is redirected to a stub, so
-  only that one mod goes inert.
+- **Crash-safe by construction.** The entry that hangs the client at boot is one registered against
+  a file that is missing or will not parse. ModForge is the only writer of `uss_settings.xml` and
+  registers only what it staged in the same commit, so that entry cannot arise — it is not a check
+  that might miss a case.
 - **Incremental.** Tracks what it wrote; rebuilds a file if something else overwrote it, and
   re-fetches originals when the game updates.
 - **Merges Unbound 1 definitions across mods.** Name the `<block>` or `<css>` you change, not a
@@ -61,6 +80,31 @@ Ship your own art and sound; the XML ModForge can build for you.
 
 A `<build>` names one game file and lists the edits to make to it. Every path is relative to
 `res_mods/` and must stay inside it.
+
+### Schema reference
+
+Everything a blueprint may contain. An unknown **element** and an unknown **attribute** are both
+ignored with an info line and nothing else — a typo is quiet, so read the log after a change.
+
+| Element | Attributes | Notes |
+|---|---|---|
+| `<mod>` | `name`\*, `version`\*, `priority` | root. `priority` defaults to 0; higher applies **earlier** |
+| `<requires installer=>` | `installer`\* | version constraint, e.g. `>=1.0.0` |
+| `<requires mod=>` | `mod`\*, `version` | both enforces order and skips your mod if that one is absent |
+| `<ubBuildBlock>` | `name`\* | a `<block className=>` in `gui/unbound/markup.xml` |
+| `<ubBuildStyle>` | `name`\* | a `<css name=>` in `gui/unbound/styles.xml` |
+| `<ubMountInBattle>` | `unbound`\*, `rootElementId`\*, `name`, `hitTest`, `url` | writes the `battle_elements.xml` entries |
+| `<build>` | `file`\*, `root` | edit a vanilla file; with `root=` generate a new one |
+| `<guard>` | `ifExists` \| `ifNotExists` | inside a `<build>` with no `root=`; position does not matter |
+
+\* required.
+
+Names are **opaque and verbatim**. `$Foo` and `Foo` are different presets; nothing normalises the
+`$`, because the client does not either — it is convention, not grammar.
+
+A definition verb may not carry a `<guard>`, and neither may a `root=` build. Both are refused
+outright rather than treated as a condition that is always false: a guard reads the document it
+edits, and those two start from a definition or from nothing.
 
 ### An Unbound 1 mod, whole
 
@@ -240,7 +284,9 @@ Five things that bite if you assume otherwise:
 Prefer a path plus a stable `@name` over a long value or an index where you have the choice —
 both of the latter break on the next patch, an index silently.
 
-**Actions**, the body of a `<build>` or either definition verb:
+### Actions
+
+The body of a `<build>` or either definition verb:
 
 | Action | Does |
 |---|---|
@@ -270,9 +316,121 @@ Worth knowing:
 - **Failures are contained, not silent.** A selector that matches nothing (or any error) reverts
   just your mod's edits to that file and moves on — the rest still install. Unknown attributes and
   elements are warnings, not fatal. Watch `python.log` for `[ModForge]` lines.
-- **The summary line is worth reading.** Alongside the mod counts, each run prints
-  `definitions: N registered (X created, Y overridden), Z dropped, C conflicting write(s)`.
-  `created` where you expected `overridden` means a misspelt name; `dropped` means a definition
-  did not survive the compile and is not registered at all.
+- **The summary line is worth reading** — see [Reading the log](#reading-the-log).
 - `file=` is relative to `res_mods/`. ModForge fetches the original even if the game only ships it
   packed, so you can target any vanilla UI file, not just already-unpacked ones.
+
+## Reading the log
+
+Every line is prefixed `[ModForge]` in `python.log`. The ones worth reacting to:
+
+| Line | Means | Do |
+|---|---|---|
+| `created <ubBuildBlock name='X'>` where you meant to override | the build has no `X` | check the spelling, or whether the patch renamed it |
+| `'A' cannot set v on <bind> in …: 'B' set it first` | two mods want the same attribute | raise your `priority`, or accept B's value |
+| `… skipped -- a mod applied before it changed what that names` | a peer removed what your selector named | usually fine; your other edits landed |
+| `'A' failed on <ubBuildBlock name='X'>: ActionError: … matched nothing` | your selector matches nothing in vanilla either | fix the selector — the whole contribution was reverted |
+| `X: N expression(s) the compiled SWF does not carry` | the definition was dropped, not registered | an expression failed to compile; the reason is logged above |
+| `<styleClass value='$X'> names no preset …` | silent in game | define `$X` with `<ubBuildStyle>`, or fix the name |
+| `<block className='X'> is declared by a.xml, b.xml` | two emitted files declare one name | whichever loads last wins; nothing is logged in game |
+| `'A' writes gui/uss_settings.xml, which Unbound owns` | the mod was skipped entirely | use the verb the message names |
+| `'X' changed on disk since our last run` | something else overwrote a file ModForge wrote | the copy is kept under `.installer_cache/drift_backups/` |
+| `no manifest changes since last run; nothing to do` | the whole run was skipped | expected; touch a blueprint to force one |
+
+The run ends with two summary lines — the mod counts, then:
+
+```
+definitions: 4 registered (1 created, 3 overridden), 0 dropped, 0 conflicting write(s)
+```
+
+## Converting a ModsInstaller 4.3.1 mod
+
+`ConvertV4.py` translates a v4 instruction file. It runs outside the game on plain CPython 2.7 or
+3.x, stdlib only. It lives in the author's private notes repo, mounted at `notes/` and not part of
+a public clone:
+
+```bash
+py -3 notes/ModForge/payload_tools/ConvertV4.py <v4-file-or-dir> <output-dir>
+```
+
+**What it can and cannot see.** A v4 file is an *instruction* file. Where the mod shipped a
+prebuilt `.xml`/`.swf` pair and v4 merely registered it, nothing in the instruction describes what
+that payload defines — so the converter emits a `TODO` naming the files instead of guessing. That
+is the common case, not the exception.
+
+Finishing such a mod by hand:
+
+1. Open the payload the TODO names, e.g. `res_mods/gui/unbound/mods/aslain_link.xml`.
+2. Every **top-level** `<block className="X">` becomes `<ubBuildBlock name="X">`; every top-level
+   `<css name="$Y">` becomes `<ubBuildStyle name="$Y">`. Nested ones are not definitions — they are
+   inline children, and they come along with their parent.
+3. Express the body as edits against vanilla where you can. Where the payload is wholly the mod's
+   own, `<insert into=".">` its children.
+4. Delete the `.swf`. ModForge compiles one shared SWF for everything it emits.
+
+What the converter *does* handle mechanically: a v4 payload assembly (`<copy_past>` plus edits)
+becomes one definition verb per seeded block, because "copy vanilla X, edit it, register the file"
+and "`<ubBuildBlock name="X">` plus those edits" are the same thing. A republish — v4's
+`<rename attr_rename="className">` over a seeded copy — becomes the `/*` copy form above.
+
+The one construct it refuses to guess at is a root-level op that searched the **whole** v4 payload
+with `.//`. Each definition is its own document now, so the same action would have to be repeated
+in every one and would fail in each that has nothing matching, taking the mod with it. Those become
+a `TODO` naming the definitions involved.
+
+## Silent failures the client will not report
+
+Unbound 1 has no error reporting worth the name. These are worth knowing before you write markup,
+because none of them produces a useful symptom:
+
+| You write | What happens |
+|---|---|
+| `bind name="tpyo"` | `ReferenceError #1056` when that block is built. Measured: in a block the port builds, **the port never presents** — the client sits on "Logging in…" |
+| `bind name="tpyo!"` (trailing `!`) | nothing at all — a missing property of a sealed class reads as `undefined` here |
+| a `<styleClass>` naming no preset | ignored, no log; the element renders with inherited values |
+| an unknown child tag or attribute | dead markup; tag dispatch is E4X child access, so anything unnamed is never looked at |
+| `<flow value="verticle">`, and the same for `position`, `overflow`, `backgroundSize`, `textAlign`, `scrollbarAlign` | **the client hangs at login** — the parse throws inside the load queue, which then never advances |
+| `<background9Slice>` / `<userData>` reading any identifier | same hang; those are evaluated with a null scope while the XML loads, so they may only contain literals |
+| a registered file that is missing, empty, or malformed | the boot stalls on a countdown that never reaches zero |
+
+ModForge removes the last row by construction — it is the only writer of `uss_settings.xml` and
+registers only what it just wrote — and reports the `styleClass` and expression-key cases at
+install time. The rest are the author's to avoid. Uncaught AS3 errors *do* reach `python.log` as
+`ERROR: [Scaleform] Error: …`, so silence there is evidence.
+
+## Working on ModForge
+
+```
+PnFMods/ModForge/*.py      31 modules; the installer itself
+PnFMods/ModForge/Main.py   entry point, run once at game start
+ForgeBlueprints/           where blueprints are dropped at runtime
+notes/                     private notes repo, mounted here (gitignored)
+notes/ModForge/tools/      test suite, corpus dry-run, mutation harness
+notes/ModForge/payload_tools/  ConvertV4, the SWF compiler's oracle harness
+```
+
+| Command | Does |
+|---|---|
+| `py -2.7 notes/ModForge/tools/run_tests.py` | the whole suite |
+| `py -2.7 notes/ModForge/tools/run_tests.py merge` | one module (substring match) |
+| `py -2.7 notes/ModForge/tools/mutate_merge.py` | break each load-bearing rule in turn; the suite must go red every time |
+| `py -2.7 notes/ModForge/tools/dry_run_corpus.py` | install 110 real converted mods against a fake game tree |
+| `py -2.7 notes/ModForge/tools/audit_sandbox_names.py` | every global the installer names, against the v1 sandbox vocabulary |
+
+**Python 2.7 only, by design** — that is the interpreter the game runs the installer on, and
+`PkgMgr` and `Paths.hashBytes` are Python 2 code. The suite refuses to run on 3.x rather than
+report a green run from the wrong interpreter.
+
+Constraints that come from the v1 mod sandbox, not from taste:
+
+- **`Exception` is the only exception class you can name.** A v1 mod's `__builtins__` is a fixed
+  dict; the other 48 are absent. `except (TypeError, ValueError):` sits dormant until the error
+  path runs and then *replaces* the real error with a `NameError`. Catch `Exception` and
+  discriminate inside the handler.
+- `eval`, `globals`, `locals` and `compile` are absent too. `open` is mod-scoped.
+- `.func_name`, not `.__name__`; `class Foo(Base, object):` for new-style inheritance.
+- `audit_sandbox_names.py` checks all of this against the compiled bytecode — run it, do not eyeball it.
+
+**The mutation harness is the standard for "tested".** A rule nothing can break is a rule nothing
+pins: three real problems in this codebase surfaced only because a mutant survived, including a
+test that had been passing for the wrong reason. If you add a rule, add the mutant that proves it.
