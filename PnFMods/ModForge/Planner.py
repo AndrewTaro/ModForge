@@ -209,14 +209,16 @@ def validateTargets(m, owned):
     Refusing the whole mod, not just that one `<build>`: its payload would
     otherwise be written and never loaded, which is a mod that looks
     installed and does nothing."""
+    ownedByCase = dict((o.lower(), o) for o in owned)
     for t in m.builds:
         rel = t.file
-        if rel in owned:
+        if rel.lower() in ownedByCase:
+            canonical = ownedByCase[rel.lower()]
             logError("'%s' writes %s, which Unbound owns -- %s. Skipping it."
                      % (m.modName, rel,
-                        _INSTEAD.get(rel, "use a definition verb")))
+                        _INSTEAD.get(canonical, "use a definition verb")))
             return False
-        if rel.startswith(manifestMod.PAYLOAD_DIR):
+        if rel.lower().startswith(manifestMod.PAYLOAD_DIR.lower()):
             logError("'%s' writes %s, which is ModForge's own output "
                      "directory -- declare the definition with "
                      "<ubBuildBlock name='...'> or <ubBuildStyle name='...'> "

@@ -51,6 +51,27 @@ def _saveIndex(relPath, tag, attr, data, index):
     except Exception:
         pass
 
+def _headLength(raws):
+    """How many raw steps make the first location step: any leading `.`,
+    and the `//` that makes it a descendant step."""
+    for cut in range(1, len(raws) + 1):
+        raw = raws[cut - 1].strip()
+        if raw and raw != '.':
+            return cut
+    return len(raws)
+
+def _rest(nodes, raws):
+    if not raws:
+        return nodes
+    # `X//y`: the remainder starts at the empty step `//` leaves behind.
+    expr = '/'.join(raws)
+    if not raws[0].strip():
+        expr = './' + expr
+    out = []
+    for node in nodes:
+        out.extend(Selector.findAll(node, expr))
+    return out
+
 class Sources(object):
     def __init__(self):
         self._data = {}
@@ -59,21 +80,25 @@ class Sources(object):
         self._fragments = {}
 
     def find(self, relPath, expr):
+        """The first step must name exactly one node, in any file; the steps
+        after it may match many. The index is only a faster way to evaluate
+        a `tag[@attr='v']` first step, and gives the same answer."""
         steps = Selector.parseSelector(expr)
+        raws = Selector.splitSteps(expr)
         head = steps[0]
         if (head.axis == 'child' and head.tag not in ('.', '..', '*')
                 and len(head.predicates) == 1
                 and head.predicates[0].kind == 'attr'
                 and head.predicates[0].op == '='):
-            nodes = self._sliced(relPath, head)
-            rest = Selector.splitSteps(expr)[1:]
-            if not rest:
-                return nodes
-            out = []
-            for node in nodes:
-                out.extend(Selector.findAll(node, '/'.join(rest)))
-            return out
-        return Selector.findAll(self.document(relPath).documentElement, expr)
+            return _rest(self._sliced(relPath, head), raws[1:])
+        root = self.document(relPath).documentElement
+        cut = _headLength(raws)
+        heads = Selector.findAll(root, '/'.join(raws[:cut]))
+        if len(heads) > 1:
+            raise FragmentError(
+                "the first step of '%s' matches %d nodes in %s; it has to name "
+                "one -- add a predicate or [1]" % (expr, len(heads), relPath))
+        return _rest(heads, raws[cut:])
 
     def raw(self, relPath):
         data = self._data.get(relPath)

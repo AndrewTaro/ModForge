@@ -41,9 +41,10 @@ def _validateUnbound(data):
     # has always checked this; this one did not.
     if not data.strip():
         return ['file is empty']
+    # `#` is the only comment; both quote styles are strings.
     depth = 0
     line = 1
-    inString = False
+    inString = None
     inComment = False
     i = 0
     n = len(data)
@@ -61,13 +62,13 @@ def _validateUnbound(data):
             if ch == '\\':
                 i += 2
                 continue
-            if ch == '"':
-                inString = False
+            if ch == inString:
+                inString = None
             i += 1
             continue
-        if ch == '"':
-            inString = True
-        elif ch == ';':
+        if ch in ('"', "'"):
+            inString = ch
+        elif ch == '#':
             inComment = True
         elif ch == '(':
             depth += 1

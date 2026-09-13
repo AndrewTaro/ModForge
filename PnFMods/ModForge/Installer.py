@@ -48,19 +48,23 @@ def runInstaller(installerVersion):
     wasCompiled = registry.get('compiled', {})
     recordedStamps = registry.get('stamps', {})
     recordedOutputs = registry.get('outputs', {})
+    oldHashes = registry.get('mods', {})
     if not manifests:
-        _dropOrphanedCompiles(wasCompiled, {})
+        stats.removed = _reportRemoved(oldHashes, {})
         tx = Transaction()
-        _revertOrphanedOutputs(recordedOutputs, set(), tx)
+        reverted = _revertOrphanedOutputs(recordedOutputs, set(), tx)
         try:
             tx.commit()
         except Exception as exc:
             logError('transaction commit failed: %s' % exc)
+            Resources.shutdown()
+            return stats
+        if _registrationSettled(recordedOutputs, reverted):
+            _dropOrphanedCompiles(wasCompiled, {})
         Validate.removeStubs()
         return _finalize(registry, [], stats, installerVersion)
 
     newHashes = dict((m.modName, m.sourceHash) for m in manifests)
-    oldHashes = registry.get('mods', {})
     changed = newHashes != oldHashes
     buildChanged = registry.get('buildId') != Paths.gameBuildId()
 
@@ -105,10 +109,7 @@ def runInstaller(installerVersion):
     if not changed and not buildChanged and builtChanged:
         logInfo('manifests unchanged but a compiled payload moved; re-applying')
 
-    removedNames = [name for name in oldHashes if name not in newHashes]
-    stats.removed = len(removedNames)
-    for name in removedNames:
-        logInfo("removed '%s' since last run; will revert its changes" % name)
+    stats.removed = _reportRemoved(oldHashes, newHashes)
 
     eligible = [m for m in eligible if m.modName not in compileFailed]
     eligible = [m for m in eligible if validateFileReferences(m)]
@@ -117,9 +118,6 @@ def runInstaller(installerVersion):
     stats.failed = len(compileFailed)
     stats.skipped = stats.discovered - len(ordered) - len(compileFailed)
 
-    # Seeded, not empty: a mod whose only output is a definition never
-    # touches a <build> target, so without this it lands in no bucket at all
-    # and the summary reports it as having done nothing.
     applied = set(definitionApplied)
     failed = set()
     forgeFailed = set()
@@ -129,12 +127,13 @@ def runInstaller(installerVersion):
 
     targetFiles = _collectTargetFiles(contributors)
     tx = Transaction()
-    _revertOrphanedOutputs(recordedOutputs, set(targetFiles), tx)
+    reverted = _revertOrphanedOutputs(recordedOutputs, set(targetFiles), tx)
     staged = []
 
+    refused = []
     for relPath in targetFiles:
         try:
-            updated = _applyToTarget(relPath, contributors, sources)
+            updated = _applyToTarget(relPath, contributors, sources, refused)
         except _TargetSkipped as skip:
             logError("target '%s' skipped: %s" % (relPath, skip))
             continue
@@ -155,6 +154,7 @@ def runInstaller(installerVersion):
         logError('the definitions were built but could not be registered in '
                  '%s; the client will not load them' % Manifest.USS_SETTINGS)
 
+    stats.conflicts += len(refused)
     for m in ordered:
         if m.modName in failed:
             stats.failed += 1
@@ -177,13 +177,32 @@ def runInstaller(installerVersion):
     # After the commit, never before: a file pruned while uss_settings still
     # names it is the registered-but-absent entry that stalls the boot, and a
     # run that fails between the two leaves exactly that.
-    _dropOrphanedCompiles(wasCompiled, declared)
+    if _registrationSettled(recordedOutputs,
+                            reverted + [rel for rel, _data in staged]):
+        _dropOrphanedCompiles(wasCompiled, declared)
 
     successful = [m for m in ordered if m.modName not in failed]
     return _finalize(registry, successful, stats, installerVersion,
                      Guard.outputHashes(staged), compiled)
 
 FORGE = 'ModForge'
+
+def _reportRemoved(oldHashes, newHashes):
+    removedNames = [name for name in oldHashes if name not in newHashes]
+    for name in removedNames:
+        logInfo("removed '%s' since last run; will revert its changes" % name)
+    return len(removedNames)
+
+def _registrationSettled(recordedOutputs, written):
+    """Whether the uss_settings on disk is one this run wrote. If not, it may
+    still name a compile the prune would delete."""
+    if Manifest.USS_SETTINGS not in recordedOutputs:
+        return True
+    if Manifest.USS_SETTINGS in written:
+        return True
+    logError('%s was not rewritten this run; keeping the compiled definitions '
+             'it may still register' % Manifest.USS_SETTINGS)
+    return False
 
 class _TargetSkipped(Exception):
     pass
@@ -223,6 +242,9 @@ def _runBuilds(manifests, recorded, stamps, tx, stats):
     # this same run, before any of it has reached disk.
     pending = {}
     emittedXml = []
+    # A mod whose only outputs are generated files or definitions never
+    # reaches a <build file=> target, so it is counted from here.
+    definitionApplied = set()
     for m in manifests:
         for spec in m.builds:
             if not spec.root:
@@ -236,9 +258,10 @@ def _runBuilds(manifests, recorded, stamps, tx, stats):
                 logError("'%s' cannot generate %s: %s"
                          % (m.modName, spec.file, exc))
                 failedNames.add(m.modName)
+                continue
+            definitionApplied.add(m.modName)
 
     survivors = [m for m in manifests if m.modName not in failedNames]
-    definitionApplied = set()
     try:
         registration = _runDefinitions(survivors, sources, recorded, stamps,
                                        tx, pending, built, declared,
@@ -452,9 +475,6 @@ def _runOneGenerated(m, spec, sources, recorded, stamps, tx, pending,
     outPath = Paths.resolveResModsTarget(spec.file)
     if outPath is None:
         raise Exception('output path escapes res_mods/: %s' % spec.file)
-    for rel in Build.sourceFiles(spec.actions):
-        if Paths.resolveResModsTarget(rel) is None:
-            raise Exception('source path escapes res_mods/: %s' % rel)
 
     data = Build.buildDocument(spec, m.modName, sources)
     stamp = Paths.hashBytes(data)
@@ -536,10 +556,11 @@ def _collectTargetFiles(contributors):
                 seen.append(t.file)
     return seen
 
-def _applyToTarget(relPath, contributors, sources):
+def _applyToTarget(relPath, contributors, sources, refusedOut=None):
     """`contributors` is (label, builds, appliedOut, failedOut) in apply
     order. Forge's own entries ride in as one of them, with sets of its own
     so its name can never be confused with a mod's."""
+    import Definitions
     pristine = Resources.loadPristine(relPath)
     if pristine is None:
         raise _TargetSkipped('cannot fetch pristine copy')
@@ -550,6 +571,9 @@ def _applyToTarget(relPath, contributors, sources):
         raise _TargetSkipped('pristine is not valid XML: %s' % exc)
 
     mutated = False
+    # Same rule as a definition: highest priority applies first, so the
+    # first write of an attribute stands.
+    claims = Definitions.Claims()
     for label, builds, appliedOut, failedOut in contributors:
         targets = [t for t in builds
                    if not t.root and t.file == relPath]
@@ -557,6 +581,7 @@ def _applyToTarget(relPath, contributors, sources):
             continue
 
         snapshot = doc.cloneNode(True)
+        refusedMark = len(claims.refused)
         try:
             edited = False
             for tspec in targets:
@@ -567,7 +592,7 @@ def _applyToTarget(relPath, contributors, sources):
                 for action in tspec.actions:
                     logInfo("'%s': %s on %s"
                             % (label, action.kind, relPath))
-                    if applyAction(doc, action, label, None, sources):
+                    if applyAction(doc, action, label, None, sources, claims):
                         edited = True
 
             if edited:
@@ -580,12 +605,17 @@ def _applyToTarget(relPath, contributors, sources):
 
             doc.unlink()
             doc = snapshot
+            del claims.refused[refusedMark:]
             continue
         else:
             snapshot.unlink()
 
+    Definitions.reportRefused(claims.refused, relPath)
+    if refusedOut is not None:
+        refusedOut.extend(claims.refused)
     if not mutated:
         return None
+    Definitions.stripClaims(doc.documentElement)
     _guardDocument(relPath, doc)
     return _serialize(doc)
 

@@ -27,16 +27,22 @@ before writing markup — most Unbound 1 mistakes have no symptom at all.
 
 ## What it does, in order
 
-1. **Discover** every blueprint under `res_mods/ForgeBlueprints/` and `res_mods/PnFMods/*/manifest.xml`.
-2. **Check requirements** — installer version and mod dependencies; unmet ones skip that mod only.
+1. **Discover** every blueprint directly in `res_mods/ForgeBlueprints/` (subfolders are not
+   searched) and every `res_mods/PnFMods/*/manifest.xml`.
+2. **Check each mod** — installer version, mod dependencies, and that it does not write a file
+   [Unbound owns](#the-primitives). A mod that fails a check is skipped alone.
 3. **Order** by dependency, then `priority`, then filename.
 4. **Merge each Unbound 1 definition** every blueprint names — one document per `<block>` or
    `<css>`, sliced from the current build and carrying every mod's edits to it — then compile one
    shared `.swf` and register what it wrote.
-5. **Fetch the pristine original** of each target file (from `res/`, or unpacked from the `.pkg`).
-6. **Apply every mod's edits** and write the merged files.
+5. **Check file references** — a mod whose payload names an `<xmlfile>` or `<swffile>` that is
+   not on disk is skipped alone.
+6. **Fetch the pristine original** of each target file (from `res/`, or unpacked from the `.pkg`).
+7. **Apply every mod's edits** and write the merged files.
 
-It skips the whole run if no blueprint, mod set, or game build changed since last launch.
+It skips the rest of the run when the blueprints are byte for byte the same, the game build is the
+same, and the compiled output is the same. A file it wrote that something else changed is
+repaired either way.
 
 ## Features
 
@@ -54,8 +60,7 @@ It skips the whole run if no blueprint, mod set, or game build changed since las
   file. Two mods changing the same one contribute to a single document instead of shipping rival
   files where the last loaded wins; `priority` settles a real collision and the run reports it.
 - **Tracks vanilla markup and styles.** Your mod describes its changes rather than carrying a
-  copy, and the baseline is re-cut from the current build every launch — no re-diffing after a
-  patch.
+  copy, and the baseline is re-cut from each new game build — no re-diffing after a patch.
 - **No build step.** ModForge decides the files, compiles the `.swf` the client needs, and writes
   the `uss_settings.xml` entries. Nothing to rebuild by hand when you edit an expression.
 - **Checks what the client will not.** An expression key the compiled `.swf` lacks, a
@@ -64,8 +69,9 @@ It skips the whole run if no blueprint, mod set, or game build changed since las
 
 ## Writing a blueprint
 
-Ship it as `res_mods/PnFMods/<YourMod>/manifest.xml`, or drop it in `res_mods/ForgeBlueprints/`.
-Ship your own art and sound; the XML ModForge can build for you.
+Ship it as `res_mods/PnFMods/<YourMod>/manifest.xml`, or drop it directly in
+`res_mods/ForgeBlueprints/` — not in a subfolder, which is never searched. Ship your own art and
+sound; the XML ModForge can build for you.
 
 ```xml
 <mod name="My Mod" version="1.0.0" priority="0">
@@ -78,27 +84,33 @@ Ship your own art and sound; the XML ModForge can build for you.
 </mod>
 ```
 
-A `<build>` names one game file and lists the edits to make to it. Every path is relative to
-`res_mods/` and must stay inside it.
+A `<build>` names one game file and lists the edits to make to it.
+
+Paths (`file=`, and `from=` on `<copy>`) name a game file the way the game does:
+`gui/battle_elements.xml`. The original is read from `res/` or the `.pkg`, and the result is
+written under `res_mods/`. `\` is read as `/`, and `./` and doubled slashes are dropped. An
+absolute path or one containing `..` makes the blueprint invalid.
 
 ### Schema reference
 
 Every element a blueprint may contain at the top level; the five actions that go *inside* them
 are in [Actions](#actions). An unknown **element** and an unknown **attribute** are both ignored
-with an info line and nothing else — a typo is quiet, so read the log after a change.
+with an info line and nothing else — a typo is quiet, so read the log after a change. The
+exception is `<ubBuild>`, `<ubCompile>` and `<ubRegister>`, verbs from before 1.0.0: any of them
+makes the whole blueprint invalid, with a message naming the verb to use.
 
 | Element | Attributes | Notes |
 |---|---|---|
 | `<mod>` | `name`\*, `version`\*, `priority` | one per file. `priority` defaults to 0; higher applies **earlier** |
 | `<requires installer=>` | `installer`\* | version constraint, e.g. `>=1.0.0`. **This installer is 1.0.0.** An unmet constraint skips your mod |
-| `<requires mod=>` | `mod`\*, `version` | matches another blueprint's `<mod name=>` — so `name` is an identity key, not a label: keep it stable across renames. Enforces order, and skips your mod if that one is absent |
+| `<requires mod=>` | `mod`\*, `version` | matches another blueprint's `<mod name=>` — so `name` is an identity key, not a label: keep it stable across renames. Enforces order, and skips your mod if that one is absent. One `<requires>` takes `installer=` or `mod=`, not both |
 | `<ubBuildBlock>` | `name`\* | a `<block className=>` in `gui/unbound/markup.xml` |
 | `<ubBuildStyle>` | `name`\* | a `<css name=>` in `gui/unbound/styles.xml` |
 | `<ubMountInBattle>` | `unbound`\*, `rootElementId`\*, `name`, `hitTest`, `url`, `before` \| `after` | writes the `battle_elements.xml` entries |
 | `<build>` | `file`\*, `root` | edit a vanilla file; with `root=` generate a new one |
 | `<guard>` | `ifExists` \| `ifNotExists` | inside a `<build>` with no `root=`; position does not matter |
 
-\* required.
+\* required. `A` \| `B` means one or the other; giving both makes the blueprint invalid.
 
 Names are **opaque and verbatim**. `$Foo` and `Foo` are different presets; nothing normalises the
 `$`, because the client does not either — it is convention, not grammar.
@@ -160,9 +172,10 @@ Where they genuinely collide, `priority` decides and the run says so:
 - **Same attribute of the same element.** The higher `priority` wins; the loser is named in
   `python.log` and its *other* edits still land. Nothing is silently overwritten.
 - **One mod removes what another edits.** That one selector is skipped, reported, and the rest of
-  the mod still applies. A selector that never matched anything in vanilla is still your own
-  error and still reverts your whole contribution to that definition — the two cases are told
-  apart by replaying the action against the untouched definition.
+  the mod still applies. The action is replayed to tell this apart from your own errors: a
+  selector that matches nothing in vanilla either, or a node your own earlier action removed.
+  Those fail your mod — not just that definition, but every definition it names, and its other
+  edits in the same run.
 
 The baseline is sliced out of the build the player is running, every launch, so nothing in your
 mod is a frozen copy of vanilla.
@@ -174,7 +187,8 @@ one the game renamed in the last patch: both show up as `created` where you mean
 and the definition then renders nothing at all.
 
 If your markup will not compile, that definition alone is dropped and the reason is in
-`python.log`.
+`python.log`. In the rare case where the rest still do not compile once it is out, none are
+registered, and the log says so.
 
 One refusal is worth knowing about in advance. The client blanks six identifiers in the constant
 pool of any unsigned `.swf`: `ExternalInterface`, `GameDelegate`, `GameInfoHolder`,
@@ -196,10 +210,13 @@ count. ModForge refuses the build rather than ship something that would silently
 
 - `from=` is any vanilla file. `gui/unbound/markup.xml` holds the `<block className=>`
   definitions, `gui/unbound/styles.xml` the `<css name=>` ones; the two are disjoint.
-- The first step of `select=` names a **top-level** definition — one of the ~1,700 the build
-  declares directly under `<ui>`. A name that only exists nested inside another is not
-  addressable, and if a build ever declares the same one twice the copy is refused rather than
-  guessing between them. Further steps reach inside it: `block[@className='X']/style`.
+- The **first step** of `select=` has to match exactly one node; a first step that matches
+  none or several is refused rather than guessed at. The steps after it may match any number:
+  `block[@className='X']/*` copies every child.
+- In `markup.xml` and `styles.xml`, `block[@className='X']` is a child step of `<ui>`, so it
+  names a **top-level** definition — one of the 1,744 blocks or 286 presets the build declares
+  there. `.//block[@className='X']` also matches nested blocks, so it is refused for the 95
+  top-level names build 13187581 also uses nested.
 - Children of `<copy>` are actions on the copy itself, with selectors relative to it, so a
   `<setAttribute>` with no `select=` rewrites its root attribute.
 - Without `from=`, `<copy>` clones from the document being built rather than another file.
@@ -238,20 +255,24 @@ and is **required** — the two are written differently in all three places that
 |---|---|---|
 | class | `lesta.libs.unbound.UnboundElement` | `lesta.unbound2.UbElement` |
 | root id | inside `<properties>` | `elementName=` on the element |
-| controller | written — without it the element is listed and never constructed | none |
+| controller | written — without it the element is created empty and its markup is never built | none |
 
 There is no default and no guess. ModForge cannot tell the two apart from the id: an Unbound 1
-root is a `<block>` in a definition that has not been merged yet when the macro expands. Naming
-the wrong one produces a well-formed entry that simply never renders.
+root is a `<block>` in a definition that has not been merged yet when the macro expands.
+`unbound="2"` naming an id no `.unbound` file defines is reported at install time. The reverse,
+`unbound="1"` naming an Unbound 2 view, produces a well-formed entry that never renders, and
+nothing reports it.
 
 `name=` is the instance name the client uses internally and defaults to `rootElementId`. Vanilla
 gives every entry a distinct instance name (`ubMarkersContainer`, `unboundShipStateBars`), so a
 name of your own is worth setting.
 
-`hitTest=` takes `true` or `false` and **defaults to `true`**; `false` opts out of mouse
-hit-testing, worth doing for anything purely decorative. `url=` is accepted and passed through,
-but an Unbound element does not need one — vanilla's own Unbound 1 entries carry none — so leave
-it out unless you know otherwise.
+`hitTest=` takes `true` or `false` and **defaults to `false`**. An element that hit-tests takes
+every click over its area, including clicks the game itself needs, so turn it on only for
+something the player interacts with. Any other value is read as `false` and logged.
+
+`url=` is passed through. Vanilla's Unbound 1 entries carry none. 8 of its 18 Unbound 2 entries
+do, to load art embedded in a `.swf`; set it only if your view uses such assets.
 
 **Placement is render order, so set it.** `before=` and `after=` take the `elementName` of an
 existing entry:
@@ -265,11 +286,14 @@ Without either the entry is appended, which puts it on top of everything. Give o
 unless last is genuinely what you want — an element anchored `before="MarkersContainer"` draws
 *under* the markers, and appending it instead draws it over them, with no error either way. The
 anchor matches `elementName`; six of vanilla's 24 entries have only a `name`, and to sit next to
-one of those use `<build file="gui/battle_elements.xml">` directly.
+one of those use `<build file="gui/battle_elements.xml">` directly. An anchor that matches no
+entry is an error: your mod's edits to `battle_elements.xml` are dropped and the log names the
+anchor.
 
 ### The primitives
 
-`<ubBuildBlock>`, `<ubBuildStyle>` and `<ubMountInBattle>` sit on top of one thing:
+`<ubMountInBattle>` is written for you as a `<build>`, the one primitive a blueprint edits files
+with:
 
 | Element | Does |
 |---|---|
@@ -277,14 +301,16 @@ one of those use `<build file="gui/battle_elements.xml">` directly.
 | `<build file="…" root="ui">` | Generate a new file, starting from an empty `<ui>` document. |
 
 `<build file=>` is for the vanilla files no definition-keyed verb covers — `gui/battle_layout.xml`
-and the like.
+and the like. `<ubBuildBlock>` and `<ubBuildStyle>` are not built on it: they have a pipeline of
+their own, and they write the `uss_settings.xml` registration that a `<build>` is refused.
 
 **It will not write what Unbound owns.** `gui/uss_settings.xml`, `gui/unbound/markup.xml`,
 `gui/unbound/styles.xml`, anything else vanilla lists in that file's `<default>` block, and
 ModForge's own output directory `gui/unbound/mods/` are all refused, and the mod is skipped with a
 message naming the verb to use instead. ModForge is the only writer of those, which is what lets
-it guarantee that every registered entry names a file it just wrote — the registered-but-missing
-entry is the one that hangs the client at boot with nothing in the log.
+it guarantee that every registered entry names a file it just wrote. A registered-but-missing
+entry hangs the client at boot, and the only trace is the client's own
+`ERROR: [Scaleform] Error: … missing xml from url:…` line in `python.log`.
 
 If you ship a prebuilt `.xml`/`.swf` pair today, declare its definitions with `<ubBuildBlock>` /
 `<ubBuildStyle>` instead and drop the `.swf` — ModForge compiles one for everything it emits.
@@ -293,7 +319,8 @@ If you ship a prebuilt `.xml`/`.swf` pair today, declare its definitions with `<
 
 A subset of XPath 1.0, and **everything in it means exactly what XPath means** — checked
 expression-by-expression against a real XPath engine. Anything outside the subset is refused with
-an error, never quietly misread.
+an error, never quietly misread. One deliberate exception: `..` from a file's root element matches
+nothing, where XPath would return the document node, because no action can edit that.
 
 | | |
 |---|---|
@@ -307,7 +334,7 @@ an error, never quietly misread.
 Not supported, and refused: `//` from the root (there are no absolute paths — use `.//`), `|`,
 `position()>1`, `@a` as a step, and any value containing `]`.
 
-Five things that bite if you assume otherwise:
+Seven things that bite if you assume otherwise:
 
 - **A predicate takes either quote style.** An Unbound `value=` is built out of single-quoted
   strings, so selecting a `<bind>` by its expression needs the double-quoted form:
@@ -338,7 +365,8 @@ Prefer a path plus a stable `@name` over a long value or an index where you have
 both of the latter break on the next patch, an index silently.
 
 One mod may `setAttribute` the same attribute repeatedly; the writes stack in order and the last
-one stands. The conflict rule below is between *different* mods, not within one.
+one stands. The [conflict rule](#an-unbound-1-mod-whole) is between *different* mods, not within
+one.
 
 ### Actions
 
@@ -369,9 +397,13 @@ Worth knowing:
   mods apply one after another. A higher `priority` runs earlier, so a later mod's selectors can
   match — and edit — what an earlier one added. Use `<requires mod=…>` when you truly depend on
   another mod: it both enforces order and skips your mod if that mod is absent.
-- **Failures are contained, not silent.** A selector that matches nothing (or any error) reverts
-  just your mod's edits to that file and moves on — the rest still install. Unknown attributes and
-  elements are warnings, not fatal. Watch `python.log` for `[ModForge]` lines.
+- **Two mods setting the same attribute: the higher `priority` wins, in every file.** The first
+  write stands, the later one is refused, and the loser is named in `python.log`.
+- **Failures are contained, not silent.** In a `<build file=>` edit, a selector that matches
+  nothing (or any other error) reverts your mod's edits to that one file, and the rest still
+  install. A failure in a `root=` build or a definition verb drops your mod from the whole run.
+  Unknown attributes and elements are info lines, not fatal. Watch `python.log` for `[ModForge]`
+  lines.
 - **The summary line is worth reading** — see [Reading the log](#reading-the-log).
 - `file=` is relative to `res_mods/`. ModForge fetches the original even if the game only ships it
   packed, so you can target any vanilla UI file, not just already-unpacked ones.
@@ -383,20 +415,25 @@ Every line is prefixed `[ModForge]` in `python.log`. The ones worth reacting to:
 | Line | Means | Do |
 |---|---|---|
 | `created <ubBuildBlock name='X'>` where you meant to override | the build has no `X` | check the spelling, or whether the patch renamed it |
-| `'A' cannot set v on <bind> in …: 'B' set it first` | two mods want the same attribute | raise your `priority`, or accept B's value |
+| `'A' cannot set v on <bind> in …: 'B' set it first` | two mods want the same attribute, in a definition or a file | raise your `priority`, or accept B's value |
 | `… skipped -- a mod applied before it changed what that names` | a peer removed what your selector named | usually fine; your other edits landed |
-| `'A' failed on <ubBuildBlock name='X'>: ActionError: … matched nothing` | your selector matches nothing in vanilla either | fix the selector — the whole contribution was reverted |
+| `'A' failed on <ubBuildBlock name='X'>: ActionError: … matched nothing` | your selector matches nothing in vanilla either | fix the selector — your mod was dropped from the run |
+| the same, ending `(an earlier action of this mod changed what it names)` | one of your own earlier actions removed or changed the node | reorder or fix your own actions |
+| `the first step of '…' matches N nodes in …` | a `<copy from=>` selector is ambiguous | add a predicate or `[1]` to the first step |
+| `'A' references missing file: …` | a payload names an `<xmlfile>`/`<swffile>` that is not on disk | ship the file or fix the path — the mod was skipped |
+| `<ubMountInBattle hitTest='…'> is not true or false; using false` | a typo in `hitTest=` | write `true` or `false` |
 | `X: N expression(s) the compiled SWF does not carry` | the definition was dropped, not registered | an expression failed to compile; the reason is logged above |
 | `<styleClass value='$X'> names no preset …` | silent in game | define `$X` with `<ubBuildStyle>`, or fix the name |
 | `<block className='X'> is declared by a.xml, b.xml` | two emitted files declare one name | whichever loads last wins; nothing is logged in game |
 | `'A' writes gui/uss_settings.xml, which Unbound owns` | the mod was skipped entirely | use the verb the message names |
-| `'X' changed on disk since our last run` | something else overwrote a file ModForge wrote | the copy is kept under `.installer_cache/drift_backups/` |
-| `no manifest changes since last run; nothing to do` | the whole run was skipped | expected; touch a blueprint to force one |
+| `'X' changed on disk since our last run (…)` | something else overwrote or deleted a file a `<build file=>` wrote | an overwritten copy is kept under `.installer_cache/drift_backups/`; a deleted one has nothing to keep. A changed compiled definition is rewritten without this line |
+| `no manifest changes since last run; nothing to do` | the whole run was skipped | expected. Touching a blueprint does not force a run — the check reads content, not timestamps. Change the blueprint, or delete `.installer_cache/installed.xml` |
 
-The run ends with two summary lines — the mod counts, then:
+The run ends with two summary lines:
 
 ```
-definitions: 4 registered (1 created, 3 overridden), 0 dropped, 0 conflicting write(s)
+done in 0.21s: discovered=5 installed=5 updated=0 unchanged=0 skipped=0 failed=0 removed=0 conflicts=0
+definitions: 4 registered (1 created, 3 overridden), 0 dropped
 ```
 
 ## Converting a ModsInstaller 4.3.1 mod
@@ -409,11 +446,13 @@ a public clone:
 py -3 notes/ModForge/payload_tools/ConvertV4.py <v4-file-or-dir> <output-dir>
 ```
 
-v4 files come in two shapes. Which one dominates depends on the mod set: across one author's
-own 25, 21 were battle mounts; across a 110-mod third-party corpus, most were payload
-registrations. Check before assuming.
+v4 files come in two main shapes. Which one dominates depends on the mod set: across one
+author's own 26, 22 were battle mounts; across a 110-mod third-party corpus, most were payload
+registrations. Check before assuming. A few edit other vanilla files (4 of the 110 edit
+`gui/battle_layout.xml`); those convert to a plain `<build file=>`.
 
-**Shape one: a `battle_elements.xml` insert.** Converts to a single `<ubMountInBattle>`:
+**Shape one: a `battle_elements.xml` insert.** Converts to a `<ubMountInBattle>` when the
+result installs byte for byte what the v4 insert did:
 
 | v4 | blueprint |
 |---|---|
@@ -421,9 +460,15 @@ registrations. Check before assuming.
 | `<element class="lesta.unbound2.UbElement" elementName="X">` | `<ubMountInBattle unbound="2" rootElementId="X">` |
 | `<element class="lesta.libs.unbound.UnboundElement">` + a `<controller>` | `<ubMountInBattle unbound="1" …>` — it writes the controller too |
 | `name="unbound2MyThing"` on the element | `name="unbound2MyThing"` — **carry it over.** Omitted, it defaults to `rootElementId`, silently changing the client-internal instance name |
-| `<properties hitTest="true"/>` | `hitTest="true"` (the default) |
+| `<properties hitTest="true"/>` | `hitTest="true"` — always written, since the verb defaults to `false` |
+| `url="x.swf"` on the element | `url="x.swf"` |
 | `<position insert="after_node" … value_1="MainHud"/>` | `after="MainHud"` |
 | `<do_if_not_exist …/>` | drop it — re-applying is idempotent |
+
+Anything the verb cannot express keeps the insert as a `<build file="gui/battle_elements.xml">`:
+an anchor on `name` rather than `elementName`, extra attributes or children, a real `<guard>`,
+or an Unbound 1 element without its controller. Across the 110-mod corpus, 26 of the 47
+`battle_elements.xml` mods convert to mounts.
 
 **Do not drop the `<position>`.** It is render order, and losing it is silent.
 
@@ -529,10 +574,14 @@ Constraints that come from the v1 mod sandbox, not from taste:
   dict; the other 48 are absent. `except (TypeError, ValueError):` sits dormant until the error
   path runs and then *replaces* the real error with a `NameError`. Catch `Exception` and
   discriminate inside the handler.
-- `eval`, `globals`, `locals` and `compile` are absent too. `open` is mod-scoped.
+- `eval`, `globals`, `locals` and `compile` are absent too.
+- `open` is mod-scoped, and outside the mod's own directory it returns `None` rather than raising —
+  the failure surfaces later as `'NoneType' object has no attribute …`. Every file the installer
+  touches is outside it, so all I/O goes through `Paths.openRead` / `Paths.openWrite`.
 - `.func_name`, not `.__name__`; `class Foo(Base, object):` for new-style inheritance.
-- `audit_sandbox_names.py` checks all of this against the compiled bytecode — run it, do not eyeball it.
+- `audit_sandbox_names.py` checks all of this by reading the source AST — run it, do not eyeball
+  it. A bytecode scan misses class bases, which Python 2 compiles as `LOAD_NAME` at module scope.
 
 **The mutation harness is the standard for "tested".** A rule nothing can break is a rule nothing
-pins: three real problems in this codebase surfaced only because a mutant survived, including a
-test that had been passing for the wrong reason. If you add a rule, add the mutant that proves it.
+pins: a surviving mutant once exposed a test that had been passing for the wrong reason. If you
+add a rule, add the mutant that proves it.

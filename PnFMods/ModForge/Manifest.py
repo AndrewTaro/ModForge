@@ -2,7 +2,7 @@
 
 import re
 
-from Logger import logInfo
+from Logger import logInfo, logError
 from Codec import _u2
 
 VANILLA_MARKUP = 'gui/unbound/markup.xml'
@@ -101,6 +101,7 @@ _KNOWN_REPLACE_ATTRS = set(['select'])
 _KNOWN_SET_ATTRIBUTE_ATTRS = set(['select', 'attribute', 'from', 'to'])
 _KNOWN_COPY_ATTRS = set(['select', 'from', 'into', 'before', 'after'])
 _KNOWN_GUARD_ATTRS = set(['ifExists', 'ifNotExists'])
+_KNOWN_REQUIRES_ATTRS = set(['installer', 'mod', 'version'])
 _KNOWN_DEFINITION_ATTRS = set(['name'])
 _KNOWN_UB_MOUNT_ATTRS = set(['unbound', 'rootElementId', 'name', 'hitTest',
                              'url', 'before', 'after'])
@@ -170,7 +171,12 @@ def parseManifest(filePath, fileBytes):
     return m
 
 def _parseRequires(m, node):
+    _warnUnknown(node, _KNOWN_REQUIRES_ATTRS, 'requires attribute', m.modName)
     inst = node.get('installer')
+    if inst is not None and (node.get('mod') is not None
+                             or node.get('version') is not None):
+        raise ManifestError('%s: <requires> takes installer= or mod=, not '
+                            'both; write two <requires>' % m.modName)
     if inst is not None:
         m.installerRequirement = inst.strip()
         return
@@ -186,9 +192,9 @@ def _parseRequires(m, node):
 def _parseBuild(m, node):
     _warnUnknown(node, _KNOWN_BUILD_ATTRS, 'build attribute', m.modName)
     b = BuildSpec()
-    b.file = node.get('file')
-    if not b.file:
+    if not node.get('file'):
         raise ManifestError("%s: <build> requires `file`" % m.modName)
+    b.file = _relPath(m, node.get('file'), 'file')
     root = node.get('root')
     b.root = root.strip() if root else None
     if b.root is not None and not _TAG_RE.match(b.root):
@@ -208,6 +214,23 @@ def _parseBuild(m, node):
                 b.actions.append(action)
     return b
 
+def _relPath(m, value, attr):
+    """One spelling per file. The pristine cache is keyed on it, so `..`
+    would write outside the cache, and a second spelling of an owned file
+    would pass the ownership check."""
+    path = value.strip().replace('\\', '/')
+    parts = [p for p in path.split('/') if p not in ('', '.')]
+    if path.startswith('/') or (parts and ':' in parts[0]):
+        raise ManifestError("%s: %s='%s' must be relative"
+                            % (m.modName, attr, value))
+    if '..' in parts:
+        raise ManifestError("%s: %s='%s' may not contain '..'"
+                            % (m.modName, attr, value))
+    if not parts:
+        raise ManifestError("%s: %s='%s' names no file"
+                            % (m.modName, attr, value))
+    return '/'.join(parts)
+
 def _parseAction(m, node, context):
     parser = _ACTION_PARSERS.get(node.tag)
     if parser is None:
@@ -226,6 +249,9 @@ def _parseNested(m, node, context):
 
 def _parseGuard(m, node):
     _warnUnknown(node, _KNOWN_GUARD_ATTRS, 'guard attribute', m.modName)
+    if node.get('ifExists') is not None and node.get('ifNotExists') is not None:
+        raise ManifestError('%s: <guard> takes ifExists= or ifNotExists=, not '
+                            'both; write two <guard>' % m.modName)
     expr = node.get('ifExists')
     if expr is not None:
         return Guard('ifExists', expr)
@@ -285,7 +311,7 @@ def _parseCopy(m, node):
     a = ActionSpec('copy')
     a.select = node.get('select')
     source = node.get('from')
-    a.source = source.strip() if source else None
+    a.source = _relPath(m, source, 'from') if source else None
     a.into = node.get('into')
     a.before = node.get('before')
     a.after = node.get('after')
@@ -400,11 +426,10 @@ def _parseUbMountInBattle(m, node):
     if unbound not in ('1', '2'):
         raise ManifestError("%s: <ubMountInBattle unbound='%s'> must be '1' or "
                             "'2'" % (m.modName, unbound))
-    rootElementId = node.get('rootElementId')
+    rootElementId = (node.get('rootElementId') or '').strip()
     if not rootElementId:
         raise ManifestError('%s: <ubMountInBattle> requires `rootElementId`'
                             % m.modName)
-    rootElementId = rootElementId.strip()
     name = (node.get('name') or rootElementId).strip()
     if not name:
         raise ManifestError('%s: <ubMountInBattle> has an empty `name`'
@@ -416,7 +441,7 @@ def _parseUbMountInBattle(m, node):
     if url:
         element.set('url', url.strip())
     props = _u2.SubElement(element, 'properties')
-    props.set('hitTest', 'true' if _boolAttr(node.get('hitTest'), True)
+    props.set('hitTest', 'true' if _hitTest(m, node.get('hitTest'))
               else 'false')
 
     before, after = _mountAnchors(m, node)
@@ -476,10 +501,16 @@ def _textElement(tag, text):
 _TAG_RE = re.compile(r'^[A-Za-z_][\w.-]*$')
 _NAME_RE = re.compile(r'^[A-Za-z0-9_.-]+$')
 
-def _boolAttr(value, default):
+def _hitTest(m, value):
+    """Off unless asked for: a battle element that hit-tests takes the
+    clicks under it, and one wrong value would eat the player's input."""
     if value is None:
-        return default
-    return value.strip().lower() not in ('false', '0', 'no', 'off')
+        return False
+    word = value.strip().lower()
+    if word not in ('true', 'false'):
+        logError("%s: <ubMountInBattle hitTest='%s'> is not true or false; "
+                 "using false" % (m.modName, value))
+    return word == 'true'
 
 def _warnUnknown(node, knownAttrs, label, context):
     for key in node.keys():

@@ -7,8 +7,7 @@ from xml.dom import minidom as _minidom
 import Build
 import BlockSlice
 import Manifest
-import Paths
-from Actions import CLAIM_PREFIX, applyAction
+from Actions import CLAIM_PREFIX, applyAction, stripClaims
 from Logger import logError, logInfo
 
 class DefinitionError(Exception):
@@ -70,15 +69,11 @@ class Claims(object):
         node.setAttribute(key, modName)
         return True
 
-def stripClaims(node):
-    """Markers must never reach the payload. Unbound ignores an attribute it
-    does not name, silently, so a leak would ship and show no symptom."""
-    if node.nodeType == node.ELEMENT_NODE and node.attributes:
-        for key in [k for k in node.attributes.keys()
-                    if k.startswith(CLAIM_PREFIX)]:
-            node.removeAttribute(key)
-    for child in node.childNodes:
-        stripClaims(child)
+def reportRefused(refused, where):
+    for modName, held, tagName, attr in refused:
+        logError("'%s' cannot set %s on <%s> in %s: '%s' set it first and "
+                 "has the higher priority"
+                 % (modName, attr, tagName, where, held))
 
 class Merger(object):
     """Assembles one document per definition out of vanilla plus every mod
@@ -104,7 +99,6 @@ class Merger(object):
                 snapshot = doc.cloneNode(True)
                 refusedMark = len(claims.refused)
                 try:
-                    _checkSources(spec.actions)
                     changed = self._contribute(doc, snapshot, pristine, m,
                                                spec, key, claims)
                     _checkShape(doc, namespace, name)
@@ -146,7 +140,11 @@ class Merger(object):
                                        _element(doc, namespace, name),
                                        self.sources, claims) or 0
             except Exception as exc:
-                if self._blame(action, snapshot, pristine, key) != 'peer':
+                blame = self._blame(action, snapshot, pristine, key)
+                if blame == 'self':
+                    raise type(exc)('%s (an earlier action of this mod changed '
+                                    'what it names)' % exc)
+                if blame != 'peer':
                     raise
                 logInfo("'%s': %s on %s skipped -- a mod applied before it "
                         "changed what that names (%s)"
@@ -181,11 +179,7 @@ class Merger(object):
             trial.unlink()
 
     def _reportRefused(self, claims, key):
-        namespace, name = key
-        for modName, held, tagName, attr in claims.refused:
-            logError("'%s' cannot set %s on <%s> in %s: '%s' set it first and "
-                     "has the higher priority"
-                     % (modName, attr, tagName, label(namespace, name), held))
+        reportRefused(claims.refused, label(*key))
 
     def baseline(self, namespace, name):
         """(document, isNew), the definition element its only child."""
@@ -227,11 +221,6 @@ class Merger(object):
                                                tag, attr))
             self._allNames[key] = names
         return name in names
-
-def _checkSources(actions):
-    for rel in Build.sourceFiles(actions):
-        if Paths.resolveResModsTarget(rel) is None:
-            raise DefinitionError('copy source escapes res_mods/: %s' % rel)
 
 def _emptyDoc(tag, attr, name):
     doc = _minidom.parseString('<ui/>')

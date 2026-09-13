@@ -61,17 +61,26 @@ def _nextElementSibling(node):
     return node.nextSibling
 
 def _canonical(node):
-    attrs = ''
+    pairs = []
     if node.attributes:
         pairs = sorted((k, node.getAttribute(k))
                        for k in node.attributes.keys()
                        if not k.startswith(CLAIM_PREFIX))
-        attrs = ','.join('%s=%s' % pair for pair in pairs)
     text = ''.join(c.data for c in node.childNodes
                    if c.nodeType == c.TEXT_NODE).strip()
-    kids = ''.join(_canonical(c) for c in node.childNodes
-                   if c.nodeType == c.ELEMENT_NODE)
-    return '<%s|%s|%s|%s>' % (node.tagName, attrs, text, kids)
+    kids = [_canonical(c) for c in node.childNodes
+            if c.nodeType == c.ELEMENT_NODE]
+    # repr, not a joined string: a value holding the separator must not
+    # collide with a different attribute set.
+    return repr((node.tagName, pairs, text, kids))
+
+def stripClaims(node):
+    if node.nodeType == node.ELEMENT_NODE and node.attributes:
+        for key in [k for k in node.attributes.keys()
+                    if k.startswith(CLAIM_PREFIX)]:
+            node.removeAttribute(key)
+    for child in node.childNodes:
+        stripClaims(child)
 
 def _childKeys(parent):
     return set(_canonical(c) for c in parent.childNodes
@@ -137,20 +146,20 @@ def applySetAttribute(doc, action, label, root, sources, claims=None):
                               % action.select)
     changed = 0
     for node in matches:
+        if action.fromValue is None:
+            value = action.toValue
+        else:
+            if not node.hasAttribute(action.attribute):
+                continue
+            current = node.getAttribute(action.attribute)
+            if action.fromValue not in current:
+                continue
+            value = current.replace(action.fromValue, action.toValue)
+        # Only a write claims: a from= that finds nothing must not refuse a peer.
         if claims is not None and not claims.claim(node, action.attribute,
                                                    label):
             continue
-        if action.fromValue is None:
-            node.setAttribute(action.attribute, action.toValue)
-            changed += 1
-            continue
-        if not node.hasAttribute(action.attribute):
-            continue
-        current = node.getAttribute(action.attribute)
-        if action.fromValue not in current:
-            continue
-        node.setAttribute(action.attribute,
-                          current.replace(action.fromValue, action.toValue))
+        node.setAttribute(action.attribute, value)
         changed += 1
     return changed
 
@@ -175,6 +184,8 @@ def applyCopy(doc, action, label, root, sources, claims=None):
     for src in found:
         clone = (doc.importNode(src, True) if action.source
                  else src.cloneNode(True))
+        # A clone is a new node; its original's claims are not its own.
+        stripClaims(clone)
         for nested in action.actions:
             applyAction(doc, nested, label, clone, sources, claims)
         parent.insertBefore(clone, anchor)

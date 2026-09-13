@@ -229,6 +229,8 @@ class Asm(object):
             if depth > self.max:
                 self.max = depth
 
+_HEX_DIGITS = frozenset(u'0123456789abcdefABCDEF')
+
 def _unquote(tok):
     if len(tok) >= 2 and tok[0] in u'\'"' and tok[-1] == tok[0]:
         body = tok[1:-1]
@@ -247,8 +249,10 @@ def _unquote(tok):
             i += 1
             continue
         n = body[i + 1]
-        if n == u'u' and i + 5 < len(body) + 1:
-            out.append(unichr(int(body[i + 2:i + 6], 16)))
+        hex4 = body[i + 2:i + 6]
+
+        if n == u'u' and len(hex4) == 4 and all(h in _HEX_DIGITS for h in hex4):
+            out.append(unichr(int(hex4, 16)))
             i += 6
         elif n == u'x':
             out.append(unichr(int(body[i + 2:i + 4], 16)))
@@ -310,7 +314,7 @@ class Emitter(object):
         if negate:
             v = -v
         integral = (v == int(v)) if isinstance(v, float) else True
-        if integral and not (decimal and v == 0):
+        if integral and not ((decimal or negate) and v == 0):
             iv = int(v)
             if -2147483648 <= iv <= 2147483647:
                 if -128 <= iv <= 127:
@@ -321,7 +325,8 @@ class Emitter(object):
                     asm.push(bytearray([PUSHINT]) + u30_bytes(self.p.i32(iv)))
                 return
 
-        asm.op_u30(PUSHDOUBLE, self.p.dbl(float(v)), +1)
+        dv = -0.0 if (negate and not decimal and v == 0) else float(v)
+        asm.op_u30(PUSHDOUBLE, self.p.dbl(dv), +1)
 
     def value(self, asm, node, ctx=CTX_VALUE):
         cls = node.__class__
