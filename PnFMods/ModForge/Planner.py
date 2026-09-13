@@ -178,11 +178,15 @@ def unboundOwnedTargets():
     build is covered without anyone editing anything -- the hand-maintained
     version of this list is what leaked repeatedly elsewhere."""
     owned = set(_ALWAYS_OWNED)
-    data = Resources.loadPristine(manifestMod.USS_SETTINGS)
-    if data is None:
-        logError('cannot read vanilla %s; falling back to the built-in list of '
-                 'Unbound-owned files' % manifestMod.USS_SETTINGS)
+    # Asked for rather than fetched: loadPristine reports a missing package
+    # loudly, and this is a refinement of a set that is already correct
+    # without it. The floor covers every file Unbound owns today; deriving
+    # only adds whatever WG puts in <default> next.
+    if not Resources.pristineExists(manifestMod.USS_SETTINGS):
+        logInfo('vanilla %s is not available; using the built-in list of '
+                'Unbound-owned files' % manifestMod.USS_SETTINGS)
         return owned
+    data = Resources.loadPristine(manifestMod.USS_SETTINGS)
     try:
         root = manifestMod._u2.fromstring(data)
     except Exception as exc:
