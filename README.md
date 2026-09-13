@@ -324,6 +324,15 @@ Five things that bite if you assume otherwise:
 - **`.//` searches descendants, a bare step searches children.** `bind[@name='x']` only sees direct
   children; if the node is nested — a style property lives under `<style>`, for instance — you want
   `.//bind[@name='x']` or the explicit path.
+- **`..` reaches the parent, and works after a descendant step.** This is how you address a
+  container that has no name of its own — find the child that identifies it, then climb:
+  ```xml
+  <insert into=".//bind[@name='repeat']/../style"><maxHeight value="800"/></insert>
+  ```
+  The one restriction is that `..` may not come *immediately* after `//`.
+- **Predicates chain, and mixing kinds is fine.** `bind[@name='collectionDH'][contains(@value,'ship')]`
+  is how you pick one of several identically-named binds — usually better than an index, which
+  breaks silently on the next patch.
 
 Prefer a path plus a stable `@name` over a long value or an index where you have the choice —
 both of the latter break on the next patch, an index silently.
@@ -337,7 +346,7 @@ The body of a `<build>` or either definition verb:
 
 | Action | Does |
 |---|---|
-| `<insert into="sel">…</insert>` | Add children into the parent. `before=`/`after=` place them; that selector is resolved **inside** the `into=` scope, not from the document root. Without either, children are appended. Identical re-inserts are skipped. |
+| `<insert into="sel">…</insert>` | Add children into the parent. `before=`/`after=` place them, and that selector is evaluated **with the `into=` node as its root** — so a bare step like `bind[@name='x']` means a *child* of it, and `.//bind[…]` is needed for anything deeper. Without either, children are appended. Identical re-inserts are skipped. |
 | `<remove select="sel"/>` | Delete matched nodes. |
 | `<replace select="sel">…</replace>` | Swap matched nodes for the supplied elements. |
 | `<setAttribute select="sel" attribute="a" to="v"/>` | Set attribute `a`, adding it if absent. With `from="old"` it replaces **every** occurrence of that substring instead, and does nothing at all where the substring is absent — silently, so check your result. `select=` may be omitted, which targets the node the action is scoped to. |
@@ -400,19 +409,33 @@ a public clone:
 py -3 notes/ModForge/payload_tools/ConvertV4.py <v4-file-or-dir> <output-dir>
 ```
 
-**Most v4 files are one `battle_elements.xml` insert**, and those convert to a single
-`<ubMountInBattle>`:
+v4 files come in two shapes. Which one dominates depends on the mod set: across one author's
+own 25, 21 were battle mounts; across a 110-mod third-party corpus, most were payload
+registrations. Check before assuming.
+
+**Shape one: a `battle_elements.xml` insert.** Converts to a single `<ubMountInBattle>`:
 
 | v4 | blueprint |
 |---|---|
+| `<check name="X" version="Y"/>` | `<mod name="X" version="Y">` — the only place a v4 file carries its identity |
 | `<element class="lesta.unbound2.UbElement" elementName="X">` | `<ubMountInBattle unbound="2" rootElementId="X">` |
 | `<element class="lesta.libs.unbound.UnboundElement">` + a `<controller>` | `<ubMountInBattle unbound="1" …>` — it writes the controller too |
-| `name="unbound2MyThing"` on the element | `name="unbound2MyThing"` |
+| `name="unbound2MyThing"` on the element | `name="unbound2MyThing"` — **carry it over.** Omitted, it defaults to `rootElementId`, silently changing the client-internal instance name |
 | `<properties hitTest="true"/>` | `hitTest="true"` (the default) |
 | `<position insert="after_node" … value_1="MainHud"/>` | `after="MainHud"` |
 | `<do_if_not_exist …/>` | drop it — re-applying is idempotent |
 
 **Do not drop the `<position>`.** It is render order, and losing it is silent.
+
+A v4 file with several `<insert>`s becomes several `<ubMountInBattle>` in one `<mod>` — that is
+fine, and better than inventing a second mod identity. Keep `<mod name=>` exactly as `<check
+name=>` had it even where that disagrees with the repo or element name; it is what
+`<requires mod=>` resolves against.
+
+**Shape two: a `uss_settings.xml` registration.** A v4 file that only registers a payload and
+touches nothing else maps to **no `<build>` and no mount at all** — ModForge registers what it
+emits, so the registration simply disappears. What survives is the payload's *content*, as
+definitions.
 
 **What it can and cannot see.** A v4 file is an *instruction* file. Where the mod shipped a
 prebuilt `.xml`/`.swf` pair and v4 merely registered it, nothing in the instruction describes what
@@ -425,9 +448,23 @@ Finishing such a mod by hand:
 2. Every **top-level** `<block className="X">` becomes `<ubBuildBlock name="X">`; every top-level
    `<css name="$Y">` becomes `<ubBuildStyle name="$Y">`. Nested ones are not definitions — they are
    inline children, and they come along with their parent.
-3. Express the body as edits against vanilla where you can. Where the payload is wholly the mod's
-   own, `<insert into=".">` its children.
-4. Delete the `.swf`. ModForge compiles one shared SWF for everything it emits.
+3. **Diff each one against the current `markup.xml`.** A v4 payload is normally a verbatim copy
+   of the vanilla definition with a handful of lines changed, so the diff *is* the mod. Three
+   shapes come out of it:
+
+   | the payload's definition is | write |
+   |---|---|
+   | vanilla's, with edits | `<ubBuildBlock name="TheVanillaName">` + just those edits |
+   | vanilla's, under a different name | a verb with the new name + the `/*` copy form, then the edits |
+   | entirely the mod's own | a verb with that name + `<insert into=".">` of its children |
+
+4. **Treat drift as deletion, not as a feature.** The payload froze vanilla at the build it was
+   made on, so a hunk that differs may be the author's intent *or* markup WG has since changed or
+   removed. Check whether the surrounding block still exists in current vanilla before carrying it
+   forward — a mechanical port of every difference silently resurrects markup the game deleted.
+   (Seen in the wild: a payload still carrying an `isEventShip` branch and an
+   `IDS_STEQ_EQUIPMENT_NOT_AVAILABLE` window that appear nowhere in either of the last two builds.)
+5. Delete the `.swf`. ModForge compiles one shared SWF for everything it emits.
 
 **Checking your work.** There is no offline validator in a public clone — the test suite and the
 dry-run harness live in the author's private notes repo. Your feedback loop is booting the client
