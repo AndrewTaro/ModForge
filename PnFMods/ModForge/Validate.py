@@ -35,6 +35,12 @@ def _validateXml(data):
     return []
 
 def _validateUnbound(data):
+    # ref:uss-splice -- an entry that yields no content kills the Unbound
+    # parser in native code, before mods load and before markup is parsed:
+    # nothing in python.log, nothing in ub_player_errors.log. The .xml path
+    # has always checked this; this one did not.
+    if not data.strip():
+        return ['file is empty']
     depth = 0
     line = 1
     inString = False
@@ -291,18 +297,65 @@ def unbound2ElementNames():
         return None
     return (modNames or set()) | (vanillaNames or set())
 
-def _modElementNames():
+_installedScan = None
+
+def _scanInstalledUnbound2():
+    """{name: [paths]} plus the files that are empty, for everything under
+    res_mods/gui/unbound2. Cached for the run: two callers want it and it
+    reads every installed view."""
+    # Keyed on the directory, not a bare flag: one process can serve more
+    # than one res_mods (the offline harness does), and a stale hit there
+    # would answer about a tree that is no longer the one being installed.
+    global _installedScan
     root = Paths.resModsDir() + _UNBOUND2_REL + '/'
+    if _installedScan is not None and _installedScan[0] == root:
+        return _installedScan[1]
     if not Paths.dirExists(root):
-        return None
-    names = set()
+        _installedScan = (root, (None, []))
+        return _installedScan[1]
+    owners = {}
+    empty = []
     for path in _walkFiles(root, '.unbound'):
         try:
             data = Paths.readBytes(path)
         except Exception:
             continue
-        names.update(_defElementNames(data))
-    return names
+        rel = path[len(Paths.resModsDir()):] if path.startswith(
+            Paths.resModsDir()) else path
+        if not data.strip():
+            empty.append(rel)
+            continue
+        for name in _defElementNames(data):
+            owners.setdefault(name, []).append(rel)
+    _installedScan = (root, (owners, empty))
+    return _installedScan[1]
+
+def _modElementNames():
+    owners, _empty = _scanInstalledUnbound2()
+    return None if owners is None else set(owners)
+
+def installedUnbound2Problems():
+    """What only the installed SET can reveal, which is why it is here and
+    not in the authoring linter: a view that is empty, and a name two
+    installed mods both define.
+
+    A mod shadowing a VANILLA name is how an Unbound 2 mod overrides a view
+    and is deliberate, so vanilla is not consulted -- only collisions between
+    two mods the player happens to have together."""
+    owners, empty = _scanInstalledUnbound2()
+    problems = []
+    for rel in sorted(empty):
+        problems.append(
+            '%s is empty; an entry that yields no content kills the Unbound '
+            'parser in native code, before anything is logged' % rel)
+    if owners:
+        for name in sorted(owners):
+            paths = sorted(set(owners[name]))
+            if len(paths) > 1:
+                problems.append(
+                    "two installed mods both define '%s': %s -- whichever "
+                    "loads last wins" % (name, ', '.join(paths)))
+    return problems
 
 def _vanillaElementNames():
     buildId = Paths.gameBuildId()

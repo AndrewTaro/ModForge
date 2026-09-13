@@ -254,6 +254,10 @@ def _runBuilds(manifests, recorded, stamps, tx, stats):
         logError(problem)
     for problem in _styleProblems(emittedXml, sources):
         logError(problem)
+    # Not about what Forge wrote: about what this player ended up with. The
+    # authoring linter cannot see which mods are installed together.
+    for problem in Validate.installedUnbound2Problems():
+        logError(problem)
     return (built, failedNames, declared, sources, registration,
             definitionApplied)
 
