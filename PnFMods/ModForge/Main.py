@@ -23,10 +23,10 @@ def _run():
     elapsed = round(time.time() - startedAt, 2)
     logInfo(
         'done in %ss: discovered=%d installed=%d updated=%d '
-        'unchanged=%d skipped=%d failed=%d removed=%d conflicts=%d'
+        'unchanged=%d noop=%d skipped=%d failed=%d removed=%d conflicts=%d'
         % (elapsed, stats.discovered, stats.installed, stats.updated,
-           stats.unchanged, stats.skipped, stats.failed, stats.removed,
-           stats.conflicts))
+           stats.unchanged, stats.noop, stats.skipped, stats.failed,
+           stats.removed, stats.conflicts))
     # Counted separately from mods because the interesting number is the one
     # the author can compare against what they meant: expecting five
     # overrides and reading 'created=1' is the only signal a name was typo'd.

@@ -432,9 +432,13 @@ Every line is prefixed `[ModForge]` in `python.log`. The ones worth reacting to:
 The run ends with two summary lines:
 
 ```
-done in 0.21s: discovered=5 installed=5 updated=0 unchanged=0 skipped=0 failed=0 removed=0 conflicts=0
+done in 0.21s: discovered=5 installed=4 updated=0 unchanged=0 noop=1 skipped=0 failed=0 removed=0 conflicts=1
 definitions: 4 registered (1 created, 3 overridden), 0 dropped
 ```
+
+On a run that completes, every discovered mod lands in exactly one of `installed`, `updated`,
+`unchanged`, `noop`, `skipped` and `failed`. `noop` is a mod that ran without error and changed nothing: every edit
+was guard-blocked, already present, or lost a conflict.
 
 ## Converting a ModsInstaller 4.3.1 mod
 

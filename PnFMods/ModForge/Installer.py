@@ -25,6 +25,7 @@ class _Stats(object):
         self.installed = 0
         self.updated = 0
         self.unchanged = 0
+        self.noop = 0
         self.skipped = 0
         self.failed = 0
         self.removed = 0
@@ -165,6 +166,10 @@ def runInstaller(installerVersion):
                 stats.updated += 1
             else:
                 stats.unchanged += 1
+        else:
+            # Ran without error and changed nothing: every edit was
+            # guard-blocked, already present, or lost a conflict.
+            stats.noop += 1
 
     try:
         tx.commit()
