@@ -365,9 +365,8 @@ def _settleDefinitions(manifests, sources, pending, failedNames, dependents,
     """(first round's definitions, final definitions, swf, count), rebuilt
     until a round fails no further mod.
 
-    A fault fails the whole mod, never one definition: the mod's other
-    definitions can name what that one added, and dropping it alone leaves
-    them throwing."""
+    A fault fails the whole mod: its other definitions may name what the
+    faulty one added."""
     first = None
     roundPaths = []
     while True:
@@ -443,8 +442,7 @@ def _requirementsHold(manifests, failedNames, dependents):
 
 def _introducers(d, sources, faults):
     """(mod names, faults): the contributor whose edit first makes the
-    definition bad, found by replaying the merge over growing prefixes, or
-    every contributor that landed if no prefix shows it."""
+    definition bad, else every contributor that landed."""
     import Definitions
     if len(d.contributors) == 1:
         return set(d.contributors), faults(d, d.data)
@@ -479,9 +477,9 @@ def _compileFaults(d, data):
     return []
 
 def _lintOffenders(emitted, sources, recordedLint, linted):
-    """Mods whose edits introduce a stall or throw the Unbound 1 linter has
-    evidence for. A verdict is cached against the bytes, the set of names
-    this run defines, the build and the linter itself."""
+    """Mods whose edits introduce a refusing lint finding. The verdict key
+    holds the names this run defines: removing a peer's definition can break
+    a reference in bytes that did not change."""
     import Definitions
     import SceneClasses
     import Ub1Stamp
@@ -506,7 +504,7 @@ def _lintOffenders(emitted, sources, recordedLint, linted):
         return set()
 
     # A linter that breaks is not evidence against a mod: what it cannot
-    # check installs as it did before there was a linter, and says so.
+    # check installs unchecked, and says so.
     try:
         import Ub1Lint
     except Exception as exc:
