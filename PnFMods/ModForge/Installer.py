@@ -5,6 +5,7 @@ import time
 from xml.dom import minidom as _minidom
 
 from Codec import _u2
+import Build
 import Guard
 import Manifest
 import Paths
@@ -48,6 +49,7 @@ def runInstaller(installerVersion):
     stats.discovered = len(manifests)
     wasCompiled = registry.get('compiled', {})
     recordedStamps = registry.get('stamps', {})
+    recordedLint = registry.get('linted', {})
     recordedOutputs = registry.get('outputs', {})
     oldHashes = registry.get('mods', {})
     if not manifests:
@@ -83,8 +85,8 @@ def runInstaller(installerVersion):
     # its keys is a client that refuses to boot.
     payloadTx = Transaction()
     (compiled, compileFailed, declared, sources, registration,
-     definitionApplied) = _runBuilds(eligible, wasCompiled, recordedStamps,
-                                     payloadTx, stats)
+     definitionApplied, dependents, linted) = _runBuilds(
+         eligible, wasCompiled, recordedStamps, recordedLint, payloadTx, stats)
     try:
         payloadTx.commit()
     except Exception as exc:
@@ -93,12 +95,15 @@ def runInstaller(installerVersion):
         return stats
 
     builtChanged = compiled != wasCompiled
+    # A new linter re-lints; its verdicts are only cached by a full run.
+    lintChanged = linted != recordedLint
     # Before the early return, not after: an output clobbered by another
     # installer is exactly the case where nothing else has changed, and the
     # rebuild below is what repairs it.
     drift = Guard.detectDrift(recordedOutputs, recordedStamps)
     _reportDrift(drift)
-    if not changed and not buildChanged and not builtChanged and not drift:
+    if (not changed and not buildChanged and not builtChanged and not drift
+            and not lintChanged):
         logInfo('no manifest changes since last run; nothing to do')
         stats.unchanged = len(manifests)
         _dropOrphanedCompiles(wasCompiled, declared)
@@ -109,10 +114,15 @@ def runInstaller(installerVersion):
         logInfo('manifests unchanged but build moved; re-applying')
     if not changed and not buildChanged and builtChanged:
         logInfo('manifests unchanged but a compiled payload moved; re-applying')
+    if (not changed and not buildChanged and not builtChanged and not drift
+            and lintChanged):
+        logInfo('manifests unchanged but the definitions were re-linted; '
+                're-applying')
 
     stats.removed = _reportRemoved(oldHashes, newHashes)
 
-    eligible = [m for m in eligible if m.modName not in compileFailed]
+    eligible = [m for m in eligible
+                if m.modName not in compileFailed and m.modName not in dependents]
     eligible = [m for m in eligible if validateFileReferences(m)]
     ordered = topoSort(eligible)
     summarizePlan(ordered)
@@ -188,7 +198,7 @@ def runInstaller(installerVersion):
 
     successful = [m for m in ordered if m.modName not in failed]
     return _finalize(registry, successful, stats, installerVersion,
-                     Guard.outputHashes(staged), compiled)
+                     Guard.outputHashes(staged), compiled, linted)
 
 FORGE = 'ModForge'
 
@@ -237,11 +247,15 @@ def _backupDrifted(relPath, absPath):
         return None
     return dest
 
-def _runBuilds(manifests, recorded, stamps, tx, stats):
+def _runBuilds(manifests, recorded, stamps, recordedLint, tx, stats):
     import Fragment
     sources = Fragment.Sources()
     built = {}
     failedNames = set()
+    # Skipped because a mod they require failed here, which is after
+    # validateRequirements has already run.
+    dependents = set()
+    linted = {}
     declared = set()
     # absPath -> staged bytes, so a compile can read a payload generated in
     # this same run, before any of it has reached disk.
@@ -266,12 +280,12 @@ def _runBuilds(manifests, recorded, stamps, tx, stats):
                 continue
             definitionApplied.add(m.modName)
 
-    survivors = [m for m in manifests if m.modName not in failedNames]
     try:
-        registration = _runDefinitions(survivors, sources, recorded, stamps,
+        registration = _runDefinitions(manifests, sources, recorded, stamps,
                                        tx, pending, built, declared,
                                        failedNames, emittedXml, stats,
-                                       definitionApplied)
+                                       definitionApplied, dependents,
+                                       recordedLint, linted)
     except Exception as exc:
         # Nothing registered beats a traceback that installs no mod at all.
         logError('the definitions could not be built (%s: %s); none of them '
@@ -287,7 +301,7 @@ def _runBuilds(manifests, recorded, stamps, tx, stats):
     for problem in Validate.installedUnbound2Problems():
         logError(problem)
     return (built, failedNames, declared, sources, registration,
-            definitionApplied)
+            definitionApplied, dependents, linted)
 
 def _styleProblems(emittedXml, sources):
     """Gated on a use existing: resolving needs the vanilla styles index,
@@ -302,48 +316,41 @@ def _styleProblems(emittedXml, sources):
 
 class _Definition(object):
     __slots__ = ('namespace', 'name', 'relPath', 'absPath', 'data', 'isNew',
-                 'contributors')
+                 'contributors', 'contributions', 'stamp')
 
 def _runDefinitions(manifests, sources, recorded, stamps, tx, pending, built,
                     declared, failedNames, emittedXml, stats,
-                    definitionApplied):
+                    definitionApplied, dependents, recordedLint, linted):
     """One XML per definition merged across every mod that names it, and one
     shared SWF over all of them. Returns what to register, or None."""
     import Definitions
-    emitted, failed, stats.conflicts = _mergeDefinitions(manifests, sources)
-    failedNames |= failed
-    if not emitted:
+    first, kept, swf, count = _settleDefinitions(
+        manifests, sources, pending, failedNames, dependents, recordedLint,
+        linted, stats)
+    keptKeys = set((d.namespace, d.name) for d in kept)
+    stats.definitionsDropped = len([1 for d in first
+                                    if (d.namespace, d.name) not in keptKeys])
+    if not kept:
         return None
 
     created = 0
-    paths = []
-    for d in emitted:
+    for d in kept:
         created += d.isNew
-        pending[d.absPath] = d.data
-        paths.append(d.absPath)
         logInfo('%s %s, from %s'
                 % ('created' if d.isNew else 'overrode',
                    Definitions.label(d.namespace, d.name),
                    ', '.join(d.contributors)))
     logInfo('%d definition(s): %d overridden, %d created'
-            % (len(emitted), len(emitted) - created, created))
+            % (len(kept), len(kept) - created, created))
 
-    dropped = set()
-    swf, count = _compileDefinitions(paths, pending, dropped)
-    kept = _coveredByTheSwf(emitted, dropped, pending)
-    for absPath in dropped:
-        del pending[absPath]
     stats.definitions = len(kept)
-    stats.definitionsNew = len([1 for d in kept if d.isNew])
-    stats.definitionsDropped = len(emitted) - len(kept)
+    stats.definitionsNew = created
     for d in kept:
         declared.add(d.relPath)
         emittedXml.append((d.relPath, d.data))
         definitionApplied.update(d.contributors)
         _stageDefinition(d, recorded, stamps, tx, built)
 
-    if not kept:
-        return None
     swfPath = None
     if count:
         _stageDefinitionsSwf(swf, [d.absPath for d in kept], pending,
@@ -352,6 +359,214 @@ def _runDefinitions(manifests, sources, recorded, stamps, tx, pending, built,
     return Manifest.registrationBuild(
         [Manifest.ussDefinitionPath(d.namespace, d.name) for d in kept],
         swfPath)
+
+def _settleDefinitions(manifests, sources, pending, failedNames, dependents,
+                       recordedLint, linted, stats):
+    """(first round's definitions, final definitions, swf, count), rebuilt
+    until a round fails no further mod.
+
+    A fault fails the whole mod, never one definition: the mod's other
+    definitions can name what that one added, and dropping it alone leaves
+    them throwing."""
+    first = None
+    roundPaths = []
+    while True:
+        for absPath in roundPaths:
+            pending.pop(absPath, None)
+        roundPaths = []
+        linted.clear()
+        eligible = _requirementsHold(manifests, failedNames, dependents)
+        emitted, failed, stats.conflicts = _mergeDefinitions(eligible, sources)
+        if first is None:
+            first = emitted
+        if failed:
+            failedNames |= failed
+            before = len(dependents)
+            _requirementsHold(eligible, failedNames, dependents)
+            if len(dependents) > before:
+                continue
+        if not emitted:
+            return first, [], None, 0
+
+        for d in emitted:
+            d.stamp = Paths.hashBytes(d.data)
+            pending[d.absPath] = d.data
+            roundPaths.append(d.absPath)
+        dropped = set()
+        swf, count = _compileDefinitions(roundPaths, pending, dropped)
+        _coveredByTheSwf(emitted, dropped, pending)
+        offenders = set()
+        for d in emitted:
+            if d.absPath not in dropped:
+                continue
+            blamed, _faults = _introducers(d, sources, _compileFaults)
+            logError('%s does not compile; not installing %s'
+                     % (d.relPath, _names(blamed)))
+            offenders |= blamed
+        if not offenders:
+            try:
+                offenders = _lintOffenders(emitted, sources, recordedLint,
+                                           linted)
+            except Exception as exc:
+                logError('the Unbound 1 lint failed (%s: %s); the definitions '
+                         'install unchecked' % (type(exc).__name__, exc))
+                linted.clear()
+                offenders = set()
+        if not offenders:
+            return first, emitted, swf, count
+        if not offenders - failedNames:
+            # Offenders come from eligible mods, so each round shrinks; if one
+            # does not, stopping beats looping at boot.
+            logError('the definitions did not settle (%s failed again); none '
+                     'are registered' % _names(offenders))
+            return first, [], None, 0
+        failedNames |= offenders
+
+def _requirementsHold(manifests, failedNames, dependents):
+    """The mods left once each failed one takes every mod requiring it."""
+    out = [m for m in manifests
+           if m.modName not in failedNames and m.modName not in dependents]
+    while True:
+        gone = failedNames | dependents
+        keep = []
+        for m in out:
+            missing = [n for n, _c in m.modRequirements if n in gone]
+            if missing:
+                logError("'%s' requires mod '%s', which failed; skipping"
+                         % (m.modName, missing[0]))
+                dependents.add(m.modName)
+            else:
+                keep.append(m)
+        if len(keep) == len(out):
+            return keep
+        out = keep
+
+def _introducers(d, sources, faults):
+    """(mod names, faults): the contributor whose edit first makes the
+    definition bad, found by replaying the merge over growing prefixes, or
+    every contributor that landed if no prefix shows it."""
+    import Definitions
+    if len(d.contributors) == 1:
+        return set(d.contributors), faults(d, d.data)
+    merger = Definitions.Merger(sources, quiet=True)
+    key = (d.namespace, d.name)
+    for i in range(1, len(d.contributions) + 1):
+        try:
+            data, _isNew = merger.build(key, d.contributions[:i])
+        except Exception:
+            continue
+        if data is None:
+            continue
+        try:
+            found = faults(d, data)
+        except Exception:
+            continue
+        if found:
+            return set([d.contributions[i - 1][0].modName]), found
+    return set(d.contributors), faults(d, d.data)
+
+def _names(modNames):
+    return ', '.join("'%s'" % n for n in sorted(modNames))
+
+def _compileFaults(d, data):
+    import UssCompile
+    probe = {d.absPath: data}
+    try:
+        UssCompile.compileMarkup([d.absPath], probe, allowEmpty=True)
+        UssCompile.expressionKeys([d.absPath], probe)
+    except Exception as exc:
+        return [exc]
+    return []
+
+def _lintOffenders(emitted, sources, recordedLint, linted):
+    """Mods whose edits introduce a stall or throw the Unbound 1 linter has
+    evidence for. A verdict is cached against the bytes, the set of names
+    this run defines, the build and the linter itself."""
+    import Definitions
+    import SceneClasses
+    import Ub1Stamp
+    buildId = Paths.gameBuildId()
+    scene = SceneClasses.load()
+    names = sorted('%s:%s' % (d.namespace, d.name) for d in emitted)
+    # A verdict reached without the class table did not check C10.
+    classKey = 'classes:%s' % ('none' if scene is None else len(scene[0]))
+    context = '|'.join([buildId, Ub1Stamp.STAMP, classKey] + names)
+    # Parsed names are unicode in game, str offline for ASCII.
+    if isinstance(context, unicode):
+        context = context.encode('utf-8')
+    context = Paths.hashBytes(context)
+    todo = []
+    for d in emitted:
+        stamp = Paths.hashBytes(d.stamp + context)
+        if recordedLint.get(d.relPath) == stamp:
+            linted[d.relPath] = stamp
+        else:
+            todo.append((d, stamp))
+    if not todo:
+        return set()
+
+    # A linter that breaks is not evidence against a mod: what it cannot
+    # check installs as it did before there was a linter, and says so.
+    try:
+        import Ub1Lint
+    except Exception as exc:
+        logError('the Unbound 1 linter did not load (%s: %s); definitions '
+                 'install unchecked' % (type(exc).__name__, exc))
+        return set()
+    known = {}
+    for namespace, (relPath, tag, attr) in Definitions.NAMESPACES.items():
+        # Unreadable disables the rules that need it; it must not cost the
+        # definitions that would have passed.
+        try:
+            known[namespace] = set(sources.index(relPath, tag, attr))
+        except Exception as exc:
+            logError('cannot check names against %s: %s' % (relPath, exc))
+            known[namespace] = None
+            continue
+        known[namespace].update(d.name for d in emitted
+                                if d.namespace == namespace)
+    ctx = Ub1Lint.Context(classNames=known['block'], cssNames=known['css'],
+                          classes=scene[0] if scene else None,
+                          controllers=scene[1] if scene else None)
+    merger = Definitions.Merger(sources, quiet=True)
+    offenders = set()
+    for d, stamp in todo:
+        where = Definitions.label(d.namespace, d.name)
+        try:
+            base = _baselineFindings(merger, d, ctx)
+            found = Ub1Lint.introduced(_lint(d.data, ctx), base)
+        except Exception as exc:
+            logError('%s could not be linted (%s: %s); installing it '
+                     'unchecked' % (where, type(exc).__name__, exc))
+            continue
+        refusing = [f for f in found if Ub1Lint.refuses(f)]
+        if not refusing:
+            for f in found:
+                logInfo('%s: %s %s at %s: %s'
+                        % (where, f.severity, f.code, f.where, f.message))
+            linted[d.relPath] = stamp
+            continue
+        blamed, faults = _introducers(
+            d, sources, lambda _d, data, base=base, ctx=ctx: [
+                f for f in Ub1Lint.introduced(_lint(data, ctx), base)
+                if Ub1Lint.refuses(f)])
+        for f in faults:
+            logError('%s would %s (%s at %s): %s; not installing %s'
+                     % (where, f.severity, f.code, f.where, f.message,
+                        _names(blamed)))
+        offenders |= blamed
+    return offenders
+
+def _lint(data, ctx):
+    import Ub1Lint
+    return Ub1Lint.lintDocument(_u2.fromstring(data), ctx)
+
+def _baselineFindings(merger, d, ctx):
+    doc, _isNew = merger.baseline(d.namespace, d.name)
+    try:
+        return _lint(Build.serialize(doc), ctx)
+    finally:
+        doc.unlink()
 
 def _coveredByTheSwf(emitted, dropped, pending):
     """Which definitions may be registered: the ones whose every expression
@@ -417,6 +632,7 @@ def _mergeDefinitions(manifests, sources):
                  d.isNew) = namespace, name, relPath, absPath, data, isNew
                 d.contributors = [m.modName for m, _ in contributions
                                   if m.modName in landed]
+                d.contributions = contributions
                 emitted.append(d)
         if not roundFailed:
             return emitted, failed, len(merger.refused)
@@ -452,7 +668,7 @@ def _compileDefinitions(paths, pending, dropped):
         return None, 0
 
 def _stageDefinition(d, recorded, stamps, tx, built):
-    stamp = Paths.hashBytes(d.data)
+    stamp = d.stamp
     built[d.relPath] = (stamp, ', '.join(d.contributors))
     previous = recorded.get(d.relPath)
     if (previous and previous[0] == stamp
@@ -697,16 +913,23 @@ def _loadRegistry():
         mtime = child.get('mtime')
         if path and size is not None and mtime is not None:
             stamps[path] = (size, mtime)
+    linted = {}
+    for child in root.findall('linted'):
+        path = child.get('path')
+        h = child.get('hash')
+        if path and h:
+            linted[path] = h
     return {
         'buildId': root.get('buildId'),
         'mods': mods,
         'outputs': outputs,
         'compiled': compiled,
         'stamps': stamps,
+        'linted': linted,
     }
 
 def _saveRegistry(buildId, successfulManifests, outputHashes, compiled,
-                  stamps):
+                  stamps, linted=None):
     root = _u2.Element('installed')
     root.set('buildId', buildId)
     root.set('installer', _installerVersion or '')
@@ -734,6 +957,11 @@ def _saveRegistry(buildId, successfulManifests, outputHashes, compiled,
         e.set('path', path)
         e.set('size', size)
         e.set('mtime', mtime)
+
+    for path in sorted(linted or {}):
+        e = _u2.SubElement(root, 'linted')
+        e.set('path', path)
+        e.set('hash', linted[path])
     data = _u2.tostring(root)
     Paths.writeBytes(Paths.installedRegistryPath(), data)
 
@@ -741,7 +969,7 @@ _installerVersion = None
 _COMPILER_STAMP = '1'
 
 def _finalize(_oldRegistry, successfulManifests, stats, installerVersion,
-              outputHashes=None, compiled=None):
+              outputHashes=None, compiled=None, linted=None):
     global _installerVersion
     _installerVersion = installerVersion
     # after the commit, so the mtimes recorded are the ones on disk
@@ -749,7 +977,7 @@ def _finalize(_oldRegistry, successfulManifests, stats, installerVersion,
                              + list((compiled or {}).keys()))
     try:
         _saveRegistry(Paths.gameBuildId(), successfulManifests, outputHashes,
-                      compiled, stamps)
+                      compiled, stamps, linted)
     except Exception as exc:
         logError('failed to write installed.xml: %s' % exc)
     Resources.shutdown()

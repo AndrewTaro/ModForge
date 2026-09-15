@@ -79,10 +79,12 @@ class Merger(object):
     """Assembles one document per definition out of vanilla plus every mod
     that names it."""
 
-    def __init__(self, sources):
+    def __init__(self, sources, quiet=False):
         self.sources = sources
         self.refused = []
         self._allNames = {}
+        # A replay re-runs a merge already reported.
+        self.quiet = quiet
 
     def build(self, key, contributions, appliedOut=None, failedOut=None):
         """(bytes, isNew), the bytes None when no contributor changed anything.
@@ -103,9 +105,10 @@ class Merger(object):
                                                spec, key, claims)
                     _checkShape(doc, namespace, name)
                 except Exception as exc:
-                    logError("'%s' failed on %s: %s: %s"
-                             % (m.modName, label(namespace, name),
-                                type(exc).__name__, exc))
+                    if not self.quiet:
+                        logError("'%s' failed on %s: %s: %s"
+                                 % (m.modName, label(namespace, name),
+                                    type(exc).__name__, exc))
                     if failedOut is not None:
                         failedOut.add(m.modName)
                     doc.unlink()
@@ -146,10 +149,11 @@ class Merger(object):
                                     'what it names)' % exc)
                 if blame != 'peer':
                     raise
-                logInfo("'%s': %s on %s skipped -- a mod applied before it "
-                        "changed what that names (%s)"
-                        % (m.modName, action.kind, label(namespace, name),
-                           exc))
+                if not self.quiet:
+                    logInfo("'%s': %s on %s skipped -- a mod applied before it "
+                            "changed what that names (%s)"
+                            % (m.modName, action.kind, label(namespace, name),
+                               exc))
         return changed
 
     def _blame(self, action, snapshot, pristine, key):
@@ -179,7 +183,8 @@ class Merger(object):
             trial.unlink()
 
     def _reportRefused(self, claims, key):
-        reportRefused(claims.refused, label(*key))
+        if not self.quiet:
+            reportRefused(claims.refused, label(*key))
 
     def baseline(self, namespace, name):
         """(document, isNew), the definition element its only child."""
@@ -191,7 +196,8 @@ class Merger(object):
                 "one to build on is ambiguous" % (label(namespace, name),
                                                   relPath))
         if span is _MISSING:
-            if self._definedNested(relPath, tag, attr, name):
+            if not self.quiet and self._definedNested(relPath, tag, attr,
+                                                      name):
                 # Not a drift report: the name IS in this build, just not as a
                 # definition of its own, so there is nothing to slice.
                 logError('%s names a <%s> that vanilla only ever writes inside '

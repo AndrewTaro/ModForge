@@ -21,6 +21,7 @@ before writing markup — most Unbound 1 mistakes have no symptom at all.
 - [Writing a blueprint](#writing-a-blueprint) — [schema reference](#schema-reference), [selectors](#selectors), [actions](#actions)
 - [An Unbound 1 mod, whole](#an-unbound-1-mod-whole)
 - [Reading the log](#reading-the-log)
+- [What gets a mod refused](#what-gets-a-mod-refused)
 - [Converting a ModsInstaller 4.3.1 mod](#converting-a-modsinstaller-431-mod)
 - [Silent failures the client will not report](#silent-failures-the-client-will-not-report)
 - [Working on ModForge](#working-on-modforge)
@@ -34,7 +35,7 @@ before writing markup — most Unbound 1 mistakes have no symptom at all.
 3. **Order** by dependency, then `priority`, then filename.
 4. **Merge each Unbound 1 definition** every blueprint names — one document per `<block>` or
    `<css>`, sliced from the current build and carrying every mod's edits to it — then compile one
-   shared `.swf` and register what it wrote.
+   shared `.swf`, [lint](#what-gets-a-mod-refused) what it merged, and register what passed.
 5. **Check file references** — a mod whose payload names an `<xmlfile>` or `<swffile>` that is
    not on disk is skipped alone.
 6. **Fetch the pristine original** of each target file (from `res/`, or unpacked from the `.pkg`).
@@ -49,7 +50,8 @@ repaired either way.
 - **Non-destructive.** Edits stack on the untouched original, so mods share a file instead of
   overwriting each other. Removing a blueprint reverts its edits.
 - **Atomic.** All files commit together or roll back — never a half-written state.
-- **Isolated failure.** A mod whose edit throws is reverted alone; the rest still install.
+- **Isolated failure.** A mod whose edit throws, or whose markup would throw or hang the client,
+  is left out whole; the rest still install. So are the mods that depend on it.
 - **Crash-safe by construction.** The entry that hangs the client at boot is one registered against
   a file that is missing or will not parse. ModForge is the only writer of `uss_settings.xml` and
   registers only what it staged in the same commit, so that entry cannot arise — it is not a check
@@ -63,9 +65,10 @@ repaired either way.
   copy, and the baseline is re-cut from each new game build — no re-diffing after a patch.
 - **No build step.** ModForge decides the files, compiles the `.swf` the client needs, and writes
   the `uss_settings.xml` entries. Nothing to rebuild by hand when you edit an expression.
-- **Checks what the client will not.** An expression key the compiled `.swf` lacks, a
-  `styleClass` that resolves to nothing, a definition two files declare — each is silent in game
-  and each is an install-time line in `python.log`.
+- **Checks what the client will not.** Every merged definition goes through an Unbound 1 linter
+  built from the client's own code: a `bind` name that does not exist, a style value that hangs the
+  load, a controller class that is not there. What would throw or hang refuses the mod; what is
+  merely dead is a line in `python.log`.
 
 ## Writing a blueprint
 
@@ -186,9 +189,8 @@ separately (`4 overridden, 1 created`), and that count is your only signal for a
 one the game renamed in the last patch: both show up as `created` where you meant `overridden`,
 and the definition then renders nothing at all.
 
-If your markup will not compile, that definition alone is dropped and the reason is in
-`python.log`. In the rare case where the rest still do not compile once it is out, none are
-registered, and the log says so.
+If your markup will not compile, your mod is left out whole and the reason is in `python.log`,
+for the same reason a [lint refusal](#what-gets-a-mod-refused) takes the whole mod.
 
 One refusal is worth knowing about in advance. The client blanks six identifiers in the constant
 pool of any unsigned `.swf`: `ExternalInterface`, `GameDelegate`, `GameInfoHolder`,
@@ -422,7 +424,16 @@ Every line is prefixed `[ModForge]` in `python.log`. The ones worth reacting to:
 | `the first step of '…' matches N nodes in …` | a `<copy from=>` selector is ambiguous | add a predicate or `[1]` to the first step |
 | `'A' references missing file: …` | a payload names an `<xmlfile>`/`<swffile>` that is not on disk | ship the file or fix the path — the mod was skipped |
 | `<ubMountInBattle hitTest='…'> is not true or false; using false` | a typo in `hitTest=` | write `true` or `false` |
-| `X: N expression(s) the compiled SWF does not carry` | the definition was dropped, not registered | an expression failed to compile; the reason is logged above |
+| `<ubBuildBlock name='X'> would throw (C1 at …): …; not installing 'A'` | your edit adds markup the client throws on (or `would stall`: hangs at login) | fix what it names — mod `A` was not installed. See [below](#what-gets-a-mod-refused) |
+| `<ubBuildBlock name='X'>: dead D1 at …: …` | your edit adds markup the client silently ignores | nothing was refused; fix it or delete it |
+| `X does not compile; not installing 'A'` | an expression in the definition does not compile | the reason is logged above it; mod `A` was not installed |
+| `'N' requires mod 'M', which failed; skipping` | `M` was refused at build time | fix `M`; `N` comes back on its own |
+| `cannot check names against gui/unbound/…: …` | a vanilla source could not be read | the name checks were skipped for this run; everything else ran |
+| `read N classes from gui/flash/consumer_main_scene.swf` | the first run on a new build read the client's classes for C10 | expected, once per build |
+| `cannot inflate …` / `cannot read the classes of …` / `… yielded N classes and no UbController` | the client's class list could not be read | C10 is skipped for this run; nothing was refused for it |
+| `the Unbound 1 lint failed (…); the definitions install unchecked` / `… could not be linted …` | the linter itself broke | nothing was refused; report it, with the log |
+| `manifests unchanged but the definitions were re-linted; re-applying` | ModForge was updated | expected, once |
+| `the definitions did not settle (…)` | an internal inconsistency; nothing was registered | report it, with the log |
 | `<styleClass value='$X'> names no preset …` | silent in game | define `$X` with `<ubBuildStyle>`, or fix the name |
 | `<block className='X'> is declared by a.xml, b.xml` | two emitted files declare one name | whichever loads last wins; nothing is logged in game |
 | `'A' writes gui/uss_settings.xml, which Unbound owns` | the mod was skipped entirely | use the verb the message names |
@@ -438,7 +449,49 @@ definitions: 4 registered (1 created, 3 overridden), 0 dropped
 
 On a run that completes, every discovered mod lands in exactly one of `installed`, `updated`,
 `unchanged`, `noop`, `skipped` and `failed`. `noop` is a mod that ran without error and changed nothing: every edit
-was guard-blocked, already present, or lost a conflict.
+was guard-blocked, already present, or lost a conflict. A mod left out because one it requires
+failed counts as `skipped`. `dropped` counts definitions that would have been registered but for a
+mod that failed.
+
+## What gets a mod refused
+
+A mod is refused when an edit it makes to a definition would make the client **throw** or
+**stall** — and only for faults whose effect was measured in the client or read from its code.
+The whole mod goes, never one definition: its other definitions may name what that one added,
+and would throw without it. Then, in turn:
+
+- **A mod that requires it** is skipped.
+- **A mod that names a definition only it created** — `child`, `instance`, `tooltip` and the like
+  pointing at it — is refused too, since that name no longer exists.
+
+**Only what your edit introduces counts.** Vanilla carries a few latent faults of its own; a mod
+that overrides one of those blocks inherits them and is not held responsible. Copied into a
+definition of your own name, they count as yours, since there is no vanilla definition of that
+name to inherit from — on build 13187581 that is two blocks, `ShipRowSelectableElement` and
+`BattlePassRewardBannerTooltipWrapper`, each naming a definition that does not exist. When several
+mods edit one definition, the fault is traced to the mod whose edit added it, and the others keep
+theirs.
+
+The faults that refuse, by code as the log names them:
+
+| Code | Refused | Why |
+|---|---|---|
+| C1 | `bind name=` that is neither a verb nor a writable property of the block | `#1056` / `#1074` when the block is built |
+| C2 | `<param name=>` the block class has no writable property for | `#1056` at construction |
+| C4 | a property `bind` with no value | `#1125` |
+| C5 | a binding with fewer `;` parts than its verb reads | `#1125` |
+| B4 | a `;` inside a string literal in a binding | the compiler and the runtime split it differently: `#1006` |
+| C6 | a `child`-style index past its list of names | builds a block named `null` |
+| C8 | a `style` binding naming no style property | `#1006` |
+| C10 | `controller` naming a class the scene lacks, or one that is not a controller | `#1065` / `#1034` |
+| C13 | a verb that needs an Unbound block, on a native block | `#1009` |
+| E2 | a name nothing defines, where the binding constructs it | `missing construction plan` |
+| F1 | `flow`, `position`, `overflow`, `backgroundSize`, `textAlign`, `scrollbarAlign` outside their values | hangs at login |
+| F6 | `background9Slice` / `userData` reading an identifier | hangs at login |
+| F7 | an `aw`/`ah` size without its two breakpoints | hangs at login |
+
+C10 checks against the classes of the build the player is running, read out of the client's own
+`consumer_main_scene.swf` once per build. If that cannot be read, C10 is skipped, not guessed.
 
 ## Converting a ModsInstaller 4.3.1 mod
 
@@ -545,19 +598,21 @@ because none of them produces a useful symptom:
 | a registered file that is missing, empty, or malformed | the boot stalls on a countdown that never reaches zero |
 
 ModForge removes the last row by construction — it is the only writer of `uss_settings.xml` and
-registers only what it just wrote — and reports the `styleClass` and expression-key cases at
-install time. The rest are the author's to avoid. Uncaught AS3 errors *do* reach `python.log` as
-`ERROR: [Scaleform] Error: …`, so silence there is evidence.
+registers only what it just wrote. The `tpyo`, `verticle` and null-scope rows
+[refuse the mod](#what-gets-a-mod-refused) at install time, and the silent rows are reported
+without refusing. Uncaught AS3 errors *do* reach `python.log` as `ERROR: [Scaleform] Error: …`, so
+silence there is evidence.
 
 ## Working on ModForge
 
 ```
-PnFMods/ModForge/*.py      31 modules; the installer itself
+PnFMods/ModForge/*.py      36 modules; the installer itself
 PnFMods/ModForge/Main.py   entry point, run once at game start
 ForgeBlueprints/           where blueprints are dropped at runtime
 notes/                     private notes repo, mounted here (gitignored)
 notes/ModForge/tools/      test suite, corpus dry-run, mutation harness
 notes/ModForge/payload_tools/  ConvertV4, the SWF compiler's oracle harness
+notes/ModForge/lint/       the Unbound 1 linter's source, its generators and fixtures
 ```
 
 | Command | Does |
@@ -567,6 +622,9 @@ notes/ModForge/payload_tools/  ConvertV4, the SWF compiler's oracle harness
 | `py -2.7 notes/ModForge/tools/mutate_merge.py` | break each load-bearing rule in turn; the suite must go red every time |
 | `py -2.7 notes/ModForge/tools/dry_run_corpus.py` | install 110 real converted mods against a fake game tree |
 | `py -2.7 notes/ModForge/tools/audit_sandbox_names.py` | every global the installer names, against the v1 sandbox vocabulary |
+| `py -3 notes/ModForge/tools/stage_uss.py --check` | the shipped compiler and linter modules match their commented sources |
+| `py -2.7 notes/ModForge/lint/test_ub1lint.py --staged` | the linter's fixtures, against the shipped copy |
+| `py -2.7 notes/ModForge/lint/mutate_lint.py` | the linter's mutation run |
 
 **Python 2.7 only, by design** — that is the interpreter the game runs the installer on, and
 `PkgMgr` and `Paths.hashBytes` are Python 2 code. The suite refuses to run on 3.x rather than
