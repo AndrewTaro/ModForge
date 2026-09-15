@@ -290,7 +290,7 @@ PARTS = {
         (1, 'className', (), 'throw-lazy'),
         (3, 'boolean', (), 'none'),
         (4, 'number', (), 'silent'),
-        (5, 'number', (), 'throw-init'),
+        (5, 'number', (), 'none'),
         (6, 'number', (), 'throw-lazy'),
     ),
     'repeatObject': (

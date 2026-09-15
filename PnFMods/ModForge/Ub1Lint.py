@@ -70,8 +70,8 @@ PART_HANDLERS = {
 }
 
 DEFERRED_KINDS = {
-    'number': 'the throws are Flash Player Timer RangeErrors, unmeasured in '
-              'Scaleform',
+    'number': 'the audit took its throws from Flash Player Timer docs; '
+              'new Timer(-1, 1) measured not to throw in Scaleform',
     'boolean': 'each throw also depends on part 2: a compound rule, not a kind',
     'elementName': 'needs descendant name resolution across the document',
 }

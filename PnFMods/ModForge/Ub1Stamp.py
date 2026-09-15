@@ -1,3 +1,3 @@
 # coding=utf-8
 
-STAMP = '6df10995fea887f4'
+STAMP = '1db9999bdb2efa90'
