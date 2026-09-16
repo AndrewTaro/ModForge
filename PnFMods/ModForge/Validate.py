@@ -342,7 +342,11 @@ def installedUnbound2Problems():
 
     A mod shadowing a VANILLA name is how an Unbound 2 mod overrides a view
     and is deliberate, so vanilla is not consulted -- only collisions between
-    two mods the player happens to have together."""
+    two mods the player happens to have together.
+
+    Unbound 2 resolves a duplicate the OPPOSITE way to Unbound 1: the FIRST
+    registration wins. `duplicateDefinitions` above is the last-wins rule and
+    is right about Unbound 1; do not carry it across."""
     owners, empty = _scanInstalledUnbound2()
     problems = []
     for rel in sorted(empty):
@@ -355,7 +359,9 @@ def installedUnbound2Problems():
             if len(paths) > 1:
                 problems.append(
                     "two installed mods both define '%s': %s -- whichever "
-                    "loads last wins" % (name, ', '.join(paths)))
+                    "registers FIRST wins and the rest never build; the "
+                    "client logs 'Duplicate element definition' for each "
+                    "loser" % (name, ', '.join(paths)))
     return problems
 
 def _vanillaElementNames():
