@@ -147,9 +147,10 @@ class Linter(object):
                          '"/markup.xml" or "/styles.xml" -- never loaded')
             if path in seen:
                 self.add(WARN, 'A4', where,
-                         'already registered at %s: an XML url is parsed once, '
-                         'and a duplicate SWF just pays its load cost twice'
-                         % seen[path])
+                         'already registered at %s: an xmlfile url listed '
+                         'twice never completes the markup load, so the client '
+                         'hangs at login; a duplicate SWF pays its load cost '
+                         'twice' % seen[path])
             else:
                 seen[path] = where
         return self.findings

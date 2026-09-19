@@ -466,6 +466,7 @@ def substituteBrokenRefs(doc, relPath, resolveRef, stubPathFor):
     if relPath.rsplit('/', 1)[-1] != 'uss_settings.xml':
         return []
     swapped = []
+    used = {'xmlfile': 0, 'swffile': 0}
     root = doc.documentElement
     for container in _children(root, 'mods'):
         for tag in ('xmlfile', 'swffile'):
@@ -476,7 +477,8 @@ def substituteBrokenRefs(doc, relPath, resolveRef, stubPathFor):
                 why = _brokenReason(path, resolveRef)
                 if why is None:
                     continue
-                stub = stubPathFor(tag)
+                used[tag] += 1
+                stub = stubPathFor(tag, used[tag])
                 if stub is None:
                     container.removeChild(node)
                     swapped.append((path, 'removed'))
@@ -498,18 +500,34 @@ def _brokenReason(path, resolveRef):
         return problems[0]
     return None
 
-_XML_STUB_REL = 'gui/unbound/mods/__forge_stub.xml'
-_SWF_STUB_REL = 'gui/unbound/mods/__forge_stub.swf'
+_STUB_DIR_REL = 'gui/unbound/mods/'
+_XML_STUB_STEM = '__forge_stub'
+_SWF_STUB_REL = _STUB_DIR_REL + '__forge_stub.swf'
 
-def ensureXmlStub():
-    absPath = Paths.resModsDir() + _XML_STUB_REL
+def _xmlStubName(n):
+    if n == 1:
+        return _XML_STUB_STEM + '.xml'
+    return '%s_%d.xml' % (_XML_STUB_STEM, n)
+
+# One file per entry: an xmlfile URL listed twice never finishes loading.
+# ref:uss-duplicate-url
+def ensureXmlStub(n=1):
+    name = _xmlStubName(n)
+    absPath = Paths.resModsDir() + _STUB_DIR_REL + name
     try:
         if not Paths.fileExists(absPath):
             Paths.writeBytes(absPath, STUB_XML)
     except Exception as exc:
         logInfo('could not create xml stub: %s' % exc)
         return None
-    return '../unbound/mods/__forge_stub.xml'
+    return '../unbound/mods/' + name
+
+def _isXmlStubName(name):
+    if name == _xmlStubName(1):
+        return True
+    prefix = _XML_STUB_STEM + '_'
+    return (name.startswith(prefix) and name.endswith('.xml')
+            and name[len(prefix):-4].isdigit())
 
 def ensureSwfStub():
     absPath = Paths.resModsDir() + _SWF_STUB_REL
@@ -523,7 +541,11 @@ def ensureSwfStub():
     return '../unbound/mods/__forge_stub.swf'
 
 def removeStubs():
-    for rel in (_XML_STUB_REL, _SWF_STUB_REL):
+    stubs = [_STUB_DIR_REL + name
+             for name in Paths.listFiles(Paths.resModsDir() + _STUB_DIR_REL,
+                                         '.xml')
+             if _isXmlStubName(name)]
+    for rel in stubs + [_SWF_STUB_REL]:
         absPath = Paths.resModsDir() + rel
         try:
             if Paths.fileExists(absPath):

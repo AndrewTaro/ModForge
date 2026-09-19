@@ -356,8 +356,12 @@ def _runDefinitions(manifests, sources, recorded, stamps, tx, pending, built,
         _stageDefinitionsSwf(swf, [d.absPath for d in kept], pending,
                              recorded, tx, built, declared)
         swfPath = Manifest.USS_DEFINITIONS_SWF
+    # A block copies its styleClass values when its file is parsed, so every
+    # css file loads first. ref:uss-style-order
+    ordered = ([d for d in kept if d.namespace == 'css']
+               + [d for d in kept if d.namespace != 'css'])
     return Manifest.registrationBuild(
-        [Manifest.ussDefinitionPath(d.namespace, d.name) for d in kept],
+        [Manifest.ussDefinitionPath(d.namespace, d.name) for d in ordered],
         swfPath)
 
 def _settleDefinitions(manifests, sources, pending, failedNames, dependents,
@@ -841,8 +845,9 @@ def _applyToTarget(relPath, contributors, sources, refusedOut=None):
 def _guardDocument(relPath, doc):
     resolve = Planner.resolveReference
 
-    stubPathFor = lambda tag: (Validate.ensureXmlStub() if tag == 'xmlfile'
-                               else Validate.ensureSwfStub())
+    stubPathFor = lambda tag, n: (Validate.ensureXmlStub(n)
+                                  if tag == 'xmlfile'
+                                  else Validate.ensureSwfStub())
     for original, action in Validate.substituteBrokenRefs(
             doc, relPath, resolve, stubPathFor):
         if action == 'removed':
