@@ -4,6 +4,10 @@ API_VERSION = 'API_v1.0'
 MOD_NAME = 'ModForge'
 
 import time
+# ref:stdlib-preload
+import re
+import struct
+from xml.dom import minidom
 
 from Installer import runInstaller
 from Logger import logInfo, logError
