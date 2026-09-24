@@ -496,11 +496,11 @@ C10 checks against the classes of the build the player is running, read out of t
 ## Converting a ModsInstaller 4.3.1 mod
 
 `ConvertV4.py` translates a v4 instruction file. It runs outside the game on plain CPython 2.7 or
-3.x, stdlib only. It lives in the author's private notes repo, mounted at `notes/` and not part of
-a public clone:
+3.x, stdlib only. It lives in the author's private notes repo, not in this
+repository (paths below are relative to that repo):
 
 ```bash
-py -3 notes/ModForge/payload_tools/ConvertV4.py <v4-file-or-dir> <output-dir>
+py -3 ModForge/payload_tools/ConvertV4.py <v4-file-or-dir> <output-dir>
 ```
 
 v4 files come in two main shapes. Which one dominates depends on the mod set: across one
@@ -609,22 +609,22 @@ silence there is evidence.
 PnFMods/ModForge/*.py      36 modules; the installer itself
 PnFMods/ModForge/Main.py   entry point, run once at game start
 ForgeBlueprints/           where blueprints are dropped at runtime
-notes/                     private notes repo, mounted here (gitignored)
-notes/ModForge/tools/      test suite, corpus dry-run, mutation harness
-notes/ModForge/payload_tools/  ConvertV4, the SWF compiler's oracle harness
-notes/ModForge/lint/       the Unbound 1 linter's source, its generators and fixtures
 ```
+
+The test suite, mutation harness, ConvertV4 and the linter's sources live in the author's
+private notes repo, not here. The commands below are relative to it and find this repo on
+their own.
 
 | Command | Does |
 |---|---|
-| `py -2.7 notes/ModForge/tools/run_tests.py` | the whole suite |
-| `py -2.7 notes/ModForge/tools/run_tests.py merge` | one module (substring match) |
-| `py -2.7 notes/ModForge/tools/mutate_merge.py` | break each load-bearing rule in turn; the suite must go red every time |
-| `py -2.7 notes/ModForge/tools/dry_run_corpus.py` | install 110 real converted mods against a fake game tree |
-| `py -2.7 notes/ModForge/tools/audit_sandbox_names.py` | every global the installer names, against the v1 sandbox vocabulary |
-| `py -3 notes/ModForge/tools/stage_uss.py --check` | the shipped compiler and linter modules match their commented sources |
-| `py -2.7 notes/ModForge/lint/test_ub1lint.py --staged` | the linter's fixtures, against the shipped copy |
-| `py -2.7 notes/ModForge/lint/mutate_lint.py` | the linter's mutation run |
+| `py -2.7 ModForge/tools/run_tests.py` | the whole suite |
+| `py -2.7 ModForge/tools/run_tests.py merge` | one module (substring match) |
+| `py -2.7 ModForge/tools/mutate_merge.py` | break each load-bearing rule in turn; the suite must go red every time |
+| `py -2.7 ModForge/tools/dry_run_corpus.py` | install 110 real converted mods against a fake game tree |
+| `py -2.7 ModForge/tools/audit_sandbox_names.py` | every global the installer names, against the v1 sandbox vocabulary |
+| `py -3 ModForge/tools/stage_uss.py --check` | the shipped compiler and linter modules match their commented sources |
+| `py -2.7 ModForge/lint/test_ub1lint.py --staged` | the linter's fixtures, against the shipped copy |
+| `py -2.7 ModForge/lint/mutate_lint.py` | the linter's mutation run |
 
 **Python 2.7 only, by design** — that is the interpreter the game runs the installer on, and
 `PkgMgr` and `Paths.hashBytes` are Python 2 code. The suite refuses to run on 3.x rather than
