@@ -4,7 +4,7 @@ API_VERSION = 'API_v1.0'
 MOD_NAME = 'ModForge'
 
 import time
-# ref:stdlib-preload
+
 import re
 import struct
 from xml.dom import minidom
@@ -31,9 +31,9 @@ def _run():
         % (elapsed, stats.discovered, stats.installed, stats.updated,
            stats.unchanged, stats.noop, stats.skipped, stats.failed,
            stats.removed, stats.conflicts))
-    # Counted separately from mods because the interesting number is the one
-    # the author can compare against what they meant: expecting five
-    # overrides and reading 'created=1' is the only signal a name was typo'd.
+
+
+
     logInfo('definitions: %d registered (%d created, %d overridden), '
             '%d dropped'
             % (stats.definitions, stats.definitionsNew,

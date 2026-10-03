@@ -157,9 +157,9 @@ def _candidateRelPaths(candidate):
             out.append(relPath)
     return out
 
-# Never empty, whatever the derivation below manages. An allowlist that
-# silently degrades to "permit everything" is the shape that leaked three
-# times in link_mods.py.
+
+
+
 _ALWAYS_OWNED = (manifestMod.USS_SETTINGS, manifestMod.VANILLA_MARKUP,
                  manifestMod.VANILLA_STYLES)
 
@@ -172,16 +172,16 @@ _INSTEAD = {
 }
 
 def unboundOwnedTargets():
-    """Every file Unbound 1 owns, taken from vanilla's own `<default>` block.
 
-    Derived rather than listed so a file WG adds to `<default>` in a future
-    build is covered without anyone editing anything -- the hand-maintained
-    version of this list is what leaked repeatedly elsewhere."""
+
+
+
+
     owned = set(_ALWAYS_OWNED)
-    # Asked for rather than fetched: loadPristine reports a missing package
-    # loudly, and this is a refinement of a set that is already correct
-    # without it. The floor covers every file Unbound owns today; deriving
-    # only adds whatever WG puts in <default> next.
+
+
+
+
     if not Resources.pristineExists(manifestMod.USS_SETTINGS):
         logInfo('vanilla %s is not available; using the built-in list of '
                 'Unbound-owned files' % manifestMod.USS_SETTINGS)
@@ -204,11 +204,11 @@ def unboundOwnedTargets():
     return owned
 
 def validateTargets(m, owned):
-    """A mod may not write what Unbound owns.
 
-    Refusing the whole mod, not just that one `<build>`: its payload would
-    otherwise be written and never loaded, which is a mod that looks
-    installed and does nothing."""
+
+
+
+
     ownedByCase = dict((o.lower(), o) for o in owned)
     for t in m.builds:
         rel = t.file

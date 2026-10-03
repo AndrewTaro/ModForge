@@ -9,8 +9,8 @@ from Codec import _u2
 class ActionError(Exception):
     pass
 
-# Claim markers live ON the node, written by applySetAttribute when a tracker
-# is passed. Stripped before the document is serialized.
+
+
 CLAIM_PREFIX = '_forgeClaim-'
 
 def _etToMinidomNodes(etElements, ownerDoc):
@@ -70,8 +70,8 @@ def _canonical(node):
                    if c.nodeType == c.TEXT_NODE).strip()
     kids = [_canonical(c) for c in node.childNodes
             if c.nodeType == c.ELEMENT_NODE]
-    # repr, not a joined string: a value holding the separator must not
-    # collide with a different attribute set.
+
+
     return repr((node.tagName, pairs, text, kids))
 
 def stripClaims(node):
@@ -155,7 +155,7 @@ def applySetAttribute(doc, action, label, root, sources, claims=None):
             if action.fromValue not in current:
                 continue
             value = current.replace(action.fromValue, action.toValue)
-        # Only a write claims: a from= that finds nothing must not refuse a peer.
+
         if claims is not None and not claims.claim(node, action.attribute,
                                                    label):
             continue
@@ -184,7 +184,7 @@ def applyCopy(doc, action, label, root, sources, claims=None):
     for src in found:
         clone = (doc.importNode(src, True) if action.source
                  else src.cloneNode(True))
-        # A clone is a new node; its original's claims are not its own.
+
         stripClaims(clone)
         for nested in action.actions:
             applyAction(doc, nested, label, clone, sources, claims)

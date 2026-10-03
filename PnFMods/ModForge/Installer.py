@@ -72,17 +72,17 @@ def runInstaller(installerVersion):
     buildChanged = registry.get('buildId') != Paths.gameBuildId()
 
     eligible = validateRequirements(manifests, installerVersion)
-    # Before anything is built: a mod that writes what Unbound owns cannot
-    # work, and its payload would otherwise be generated and then ignored.
+
+
     owned = unboundOwnedTargets()
     eligible = [m for m in eligible if validateTargets(m, owned)]
-    # Sorted BEFORE anything is built: definitions merge in this order, and a
-    # dict's iteration order is the mod names' hashes.
+
+
     eligible = topoSort(eligible)
-    # Payloads commit first: reference validation and the compiler both read
-    # them off disk. revertCommitted below undoes them if the registration
-    # that names them never lands -- an XML registered against a SWF missing
-    # its keys is a client that refuses to boot.
+
+
+
+
     payloadTx = Transaction()
     (compiled, compileFailed, declared, sources, registration,
      definitionApplied, dependents, linted) = _runBuilds(
@@ -95,11 +95,11 @@ def runInstaller(installerVersion):
         return stats
 
     builtChanged = compiled != wasCompiled
-    # A new linter re-lints; its verdicts are only cached by a full run.
+
     lintChanged = linted != recordedLint
-    # Before the early return, not after: an output clobbered by another
-    # installer is exactly the case where nothing else has changed, and the
-    # rebuild below is what repairs it.
+
+
+
     drift = Guard.detectDrift(recordedOutputs, recordedStamps)
     _reportDrift(drift)
     if (not changed and not buildChanged and not builtChanged and not drift
@@ -177,8 +177,8 @@ def runInstaller(installerVersion):
             else:
                 stats.unchanged += 1
         else:
-            # Ran without error and changed nothing: every edit was
-            # guard-blocked, already present, or lost a conflict.
+
+
             stats.noop += 1
 
     try:
@@ -189,9 +189,9 @@ def runInstaller(installerVersion):
         Resources.shutdown()
         return stats
 
-    # After the commit, never before: a file pruned while uss_settings still
-    # names it is the registered-but-absent entry that stalls the boot, and a
-    # run that fails between the two leaves exactly that.
+
+
+
     if _registrationSettled(recordedOutputs,
                             reverted + [rel for rel, _data in staged]):
         _dropOrphanedCompiles(wasCompiled, declared)
@@ -209,8 +209,8 @@ def _reportRemoved(oldHashes, newHashes):
     return len(removedNames)
 
 def _registrationSettled(recordedOutputs, written):
-    """Whether the uss_settings on disk is one this run wrote. If not, it may
-    still name a compile the prune would delete."""
+
+
     if Manifest.USS_SETTINGS not in recordedOutputs:
         return True
     if Manifest.USS_SETTINGS in written:
@@ -223,9 +223,9 @@ class _TargetSkipped(Exception):
     pass
 
 def _reportDrift(drift):
-    """ModForge owns its targets and rebuilds them from pristine, so a foreign
-    edit is about to be discarded. Keep a copy first: the likeliest author of
-    one is the mod author, hand-editing during development."""
+
+
+
     for relPath, why in drift:
         logError("'%s' changed on disk since our last run (%s); rebuilding it "
                  "from pristine. To keep an edit to this file, declare it in a "
@@ -252,17 +252,17 @@ def _runBuilds(manifests, recorded, stamps, recordedLint, tx, stats):
     sources = Fragment.Sources()
     built = {}
     failedNames = set()
-    # Skipped because a mod they require failed here, which is after
-    # validateRequirements has already run.
+
+
     dependents = set()
     linted = {}
     declared = set()
-    # absPath -> staged bytes, so a compile can read a payload generated in
-    # this same run, before any of it has reached disk.
+
+
     pending = {}
     emittedXml = []
-    # A mod whose only outputs are generated files or definitions never
-    # reaches a <build file=> target, so it is counted from here.
+
+
     definitionApplied = set()
     for m in manifests:
         for spec in m.builds:
@@ -287,7 +287,7 @@ def _runBuilds(manifests, recorded, stamps, recordedLint, tx, stats):
                                        definitionApplied, dependents,
                                        recordedLint, linted)
     except Exception as exc:
-        # Nothing registered beats a traceback that installs no mod at all.
+
         logError('the definitions could not be built (%s: %s); none of them '
                  'are registered' % (type(exc).__name__, exc))
         registration = None
@@ -296,16 +296,16 @@ def _runBuilds(manifests, recorded, stamps, recordedLint, tx, stats):
         logError(problem)
     for problem in _styleProblems(emittedXml, sources):
         logError(problem)
-    # Not about what Forge wrote: about what this player ended up with. The
-    # authoring linter cannot see which mods are installed together.
+
+
     for problem in Validate.installedUnbound2Problems():
         logError(problem)
     return (built, failedNames, declared, sources, registration,
             definitionApplied, dependents, linted)
 
 def _styleProblems(emittedXml, sources):
-    """Gated on a use existing: resolving needs the vanilla styles index,
-    and a run that emits no `<styleClass>` should not pay for building it."""
+
+
     if not [1 for _rel, data in emittedXml if Validate.styleClassUses(data)]:
         return []
     try:
@@ -321,8 +321,8 @@ class _Definition(object):
 def _runDefinitions(manifests, sources, recorded, stamps, tx, pending, built,
                     declared, failedNames, emittedXml, stats,
                     definitionApplied, dependents, recordedLint, linted):
-    """One XML per definition merged across every mod that names it, and one
-    shared SWF over all of them. Returns what to register, or None."""
+
+
     import Definitions
     first, kept, swf, count = _settleDefinitions(
         manifests, sources, pending, failedNames, dependents, recordedLint,
@@ -356,8 +356,8 @@ def _runDefinitions(manifests, sources, recorded, stamps, tx, pending, built,
         _stageDefinitionsSwf(swf, [d.absPath for d in kept], pending,
                              recorded, tx, built, declared)
         swfPath = Manifest.USS_DEFINITIONS_SWF
-    # A block copies its styleClass values when its file is parsed, so every
-    # css file loads first. ref:uss-style-order
+
+
     ordered = ([d for d in kept if d.namespace == 'css']
                + [d for d in kept if d.namespace != 'css'])
     return Manifest.registrationBuild(
@@ -366,11 +366,11 @@ def _runDefinitions(manifests, sources, recorded, stamps, tx, pending, built,
 
 def _settleDefinitions(manifests, sources, pending, failedNames, dependents,
                        recordedLint, linted, stats):
-    """(first round's definitions, final definitions, swf, count), rebuilt
-    until a round fails no further mod.
 
-    A fault fails the whole mod: its other definitions may name what the
-    faulty one added."""
+
+
+
+
     first = None
     roundPaths = []
     while True:
@@ -418,15 +418,15 @@ def _settleDefinitions(manifests, sources, pending, failedNames, dependents,
         if not offenders:
             return first, emitted, swf, count
         if not offenders - failedNames:
-            # Offenders come from eligible mods, so each round shrinks; if one
-            # does not, stopping beats looping at boot.
+
+
             logError('the definitions did not settle (%s failed again); none '
                      'are registered' % _names(offenders))
             return first, [], None, 0
         failedNames |= offenders
 
 def _requirementsHold(manifests, failedNames, dependents):
-    """The mods left once each failed one takes every mod requiring it."""
+
     out = [m for m in manifests
            if m.modName not in failedNames and m.modName not in dependents]
     while True:
@@ -445,8 +445,8 @@ def _requirementsHold(manifests, failedNames, dependents):
         out = keep
 
 def _introducers(d, sources, faults):
-    """(mod names, faults): the contributor whose edit first makes the
-    definition bad, else every contributor that landed."""
+
+
     import Definitions
     if len(d.contributors) == 1:
         return set(d.contributors), faults(d, d.data)
@@ -481,19 +481,19 @@ def _compileFaults(d, data):
     return []
 
 def _lintOffenders(emitted, sources, recordedLint, linted):
-    """Mods whose edits introduce a refusing lint finding. The verdict key
-    holds the names this run defines: removing a peer's definition can break
-    a reference in bytes that did not change."""
+
+
+
     import Definitions
     import SceneClasses
     import Ub1Stamp
     buildId = Paths.gameBuildId()
     scene = SceneClasses.load()
     names = sorted('%s:%s' % (d.namespace, d.name) for d in emitted)
-    # A verdict reached without the class table did not check C10.
+
     classKey = 'classes:%s' % ('none' if scene is None else len(scene[0]))
     context = '|'.join([buildId, Ub1Stamp.STAMP, classKey] + names)
-    # Parsed names are unicode in game, str offline for ASCII.
+
     if isinstance(context, unicode):
         context = context.encode('utf-8')
     context = Paths.hashBytes(context)
@@ -507,8 +507,8 @@ def _lintOffenders(emitted, sources, recordedLint, linted):
     if not todo:
         return set()
 
-    # A linter that breaks is not evidence against a mod: what it cannot
-    # check installs unchecked, and says so.
+
+
     try:
         import Ub1Lint
     except Exception as exc:
@@ -517,8 +517,8 @@ def _lintOffenders(emitted, sources, recordedLint, linted):
         return set()
     known = {}
     for namespace, (relPath, tag, attr) in Definitions.NAMESPACES.items():
-        # Unreadable disables the rules that need it; it must not cost the
-        # definitions that would have passed.
+
+
         try:
             known[namespace] = set(sources.index(relPath, tag, attr))
         except Exception as exc:
@@ -571,13 +571,13 @@ def _baselineFindings(merger, d, ctx):
         doc.unlink()
 
 def _coveredByTheSwf(emitted, dropped, pending):
-    """Which definitions may be registered: the ones whose every expression
-    key is in the SWF this run compiled.
 
-    A key the SWF lacks is not caught at load -- `UbNativeExpression` stores
-    null and `eval` CALLS it, so it is a #1006 on whatever screen first
-    builds that block. This is the one gate: what the compile rejected has no
-    keys in the SWF, so it fails here too."""
+
+
+
+
+
+
     import UssCompile
     covered = UssCompile.expressionKeys(
         [d.absPath for d in emitted if d.absPath not in dropped], pending)
@@ -598,11 +598,11 @@ def _coveredByTheSwf(emitted, dropped, pending):
     return out
 
 def _mergeDefinitions(manifests, sources):
-    """(emitted, failedNames, refusedWrites), re-merged until the failed set
-    is stable.
 
-    A mod dropped over one definition must not stay applied in another, and
-    a failure is only known once its actions have run."""
+
+
+
+
     import Definitions
     failed = set()
     while True:
@@ -641,8 +641,8 @@ def _mergeDefinitions(manifests, sources):
         failed |= roundFailed
 
 def _compileDefinitions(paths, pending, dropped):
-    """One SWF over every definition. A definition whose expressions do not
-    parse is dropped rather than costing every other one its keys."""
+
+
     import UssCompile
     try:
         return UssCompile.compileMarkup(paths, pending, allowEmpty=True)
@@ -702,18 +702,18 @@ def _runOneGenerated(m, spec, sources, recorded, stamps, tx, pending,
     data = Build.buildDocument(spec, m.modName, sources)
     stamp = Paths.hashBytes(data)
 
-    # Skips re-reading and re-hashing the output; does NOT skip the rebuild.
-    # A vanilla source can change without the build id moving (that is what
-    # test_a_changed_vanilla_block_regenerates_and_recompiles pins), so the
-    # document has to be built to know whether it still matches.
+
+
+
+
     pending[outPath] = data
     emittedXml.append((spec.file, data))
     previous = recorded.get(spec.file)
     if (previous and previous[0] == stamp and Guard.stampHolds(spec.file, stamps)):
         return (stamp, m.modName)
 
-    # Staged only when it actually differs: rewriting an identical file moves
-    # its mtime and costs the stat gate its fast path on the next run.
+
+
     if Paths.hashFile(outPath) != stamp:
         tx.stage(outPath, data)
         logInfo("'%s' generated %s from %d instruction(s)"
@@ -726,9 +726,9 @@ def _sourceHash(absPath, pending):
     return Paths.hashFile(absPath)
 
 def _revertOrphanedOutputs(recordedOutputs, claimedPaths, tx):
-    """A target no surviving mod claims goes back to stock content. Restoring
-    rather than deleting: the file keeps existing, so no res_mods entry is
-    left pointing at nothing."""
+
+
+
     reverted = []
     for relPath in sorted(recordedOutputs):
         if relPath in claimedPaths:
@@ -780,9 +780,9 @@ def _collectTargetFiles(contributors):
     return seen
 
 def _applyToTarget(relPath, contributors, sources, refusedOut=None):
-    """`contributors` is (label, builds, appliedOut, failedOut) in apply
-    order. Forge's own entries ride in as one of them, with sets of its own
-    so its name can never be confused with a mod's."""
+
+
+
     import Definitions
     pristine = Resources.loadPristine(relPath)
     if pristine is None:
@@ -794,8 +794,8 @@ def _applyToTarget(relPath, contributors, sources, refusedOut=None):
         raise _TargetSkipped('pristine is not valid XML: %s' % exc)
 
     mutated = False
-    # Same rule as a definition: highest priority applies first, so the
-    # first write of an attribute stands.
+
+
     claims = Definitions.Claims()
     for label, builds, appliedOut, failedOut in contributors:
         targets = [t for t in builds
@@ -876,9 +876,9 @@ def _serialize(doc):
     if not out.startswith('<?xml'):
         out = '<?xml version="1.0" ?>\n' + out
     if isinstance(out, unicode):
-        # minidom hands back unicode; the target is opened 'wb', so anything
-        # above ASCII would raise on write and hash in a different domain
-        # from the same file read back. Mirrors Build.serialize.
+
+
+
         out = out.encode('utf-8')
     return out
 
@@ -975,7 +975,7 @@ def _finalize(_oldRegistry, successfulManifests, stats, installerVersion,
               outputHashes=None, compiled=None, linted=None):
     global _installerVersion
     _installerVersion = installerVersion
-    # after the commit, so the mtimes recorded are the ones on disk
+
     stamps = Guard.stampsFor(list((outputHashes or {}).keys())
                              + list((compiled or {}).keys()))
     try:

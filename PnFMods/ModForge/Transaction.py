@@ -44,10 +44,10 @@ class Transaction(object):
             self._pending.clear()
 
     def revertCommitted(self):
-        """Undo a batch that already landed, because a later batch that
-        depends on it failed. A compiled payload and the uss_settings entry
-        naming it have to move together: an XML registered against a SWF that
-        no longer carries its keys is a client that will not boot."""
+
+
+
+
         if not self._committed:
             return
         for absPath in sorted(self._committed):

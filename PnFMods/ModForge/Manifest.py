@@ -106,9 +106,9 @@ _KNOWN_DEFINITION_ATTRS = set(['name'])
 _KNOWN_UB_MOUNT_ATTRS = set(['unbound', 'rootElementId', 'name', 'hitTest',
                              'url', 'before', 'after'])
 
-# Refused, not ignored: the unknown-element path below only logs, and a
-# blueprint that silently stops building anything is worse than one that
-# will not parse.
+
+
+
 _REMOVED_VERBS = {
     'ubBuild': "<ubBuild> is gone. Name the definition you edit -- "
                "<ubBuildBlock name='...'> or <ubBuildStyle name='...'> -- and "
@@ -215,9 +215,9 @@ def _parseBuild(m, node):
     return b
 
 def _relPath(m, value, attr):
-    """One spelling per file. The pristine cache is keyed on it, so `..`
-    would write outside the cache, and a second spelling of an owned file
-    would pass the ownership check."""
+
+
+
     path = value.strip().replace('\\', '/')
     parts = [p for p in path.split('/') if p not in ('', '.')]
     if path.startswith('/') or (parts and ':' in parts[0]):
@@ -336,14 +336,14 @@ DEFINITION_DIRS = {'block': PAYLOAD_DIR, 'css': PAYLOAD_DIR + 'css/'}
 USS_DEFINITION_DIRS = {'block': USS_PAYLOAD_DIR,
                        'css': USS_PAYLOAD_DIR + 'css/'}
 
-# A definition name is used verbatim: every one of the 2,030 names vanilla
-# defines is already safe, `$Preset` included, and a readable file is worth
-# more than a uniform one. Escaping is the fallback for a name that would
-# otherwise build a path or an illegal filename.
+
+
+
+
 _FILE_SAFE = set('abcdefghijklmnopqrstuvwxyz'
                  'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-$')
-# `markup`/`styles` are ref:uss-splice. The rest are Windows device names,
-# which are reserved WITH any extension -- `CON.xml` cannot be created at all.
+
+
 _RESERVED_STEMS = ('markup', 'styles', 'con', 'prn', 'aux', 'nul')
 _RESERVED_PREFIXES = ('com', 'lpt')
 
@@ -396,10 +396,10 @@ def _parseDefinition(m, node, namespace):
                             % (m.modName, context))
     return d
 
-# One shared SWF over every definition, not one each. Measured in-client:
-# ~33 ms per registered swffile against ~6.8 ms per xmlfile, and a per-file
-# SWF buys no failure isolation -- every fatal mode in the loader stalls the
-# whole boot. See PER_CLASS_PLAN.md section 4.
+
+
+
+
 DEFINITIONS_SWF = PAYLOAD_DIR + 'ForgeDefinitions.swf'
 USS_DEFINITIONS_SWF = USS_PAYLOAD_DIR + 'ForgeDefinitions.swf'
 
@@ -463,17 +463,17 @@ def _parseUbMountInBattle(m, node):
     return b
 
 def _mountAnchors(m, node):
-    """(before, after) selectors for a mount, from a plain element name.
 
-    Order in `elementList` is render order, so this is not cosmetic: an
-    element appended after `MarkersContainer` draws over what one placed
-    before it draws under. Without an anchor the entry lands last, which is
-    the right default and the wrong answer for anything layered.
 
-    The name is matched against `elementName`, which is what every entry the
-    game lays out carries and what every anchor in the wild names. Six of
-    vanilla's 24 entries have only `name`; anchor on one of those with
-    <build file="gui/battle_elements.xml"> instead."""
+
+
+
+
+
+
+
+
+
     before = (node.get('before') or '').strip()
     after = (node.get('after') or '').strip()
     if before and after:
@@ -502,8 +502,8 @@ _TAG_RE = re.compile(r'^[A-Za-z_][\w.-]*$')
 _NAME_RE = re.compile(r'^[A-Za-z0-9_.-]+$')
 
 def _hitTest(m, value):
-    """Off unless asked for: a battle element that hit-tests takes the
-    clicks under it, and one wrong value would eat the player's input."""
+
+
     if value is None:
         return False
     word = value.strip().lower()

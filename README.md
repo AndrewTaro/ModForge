@@ -105,7 +105,7 @@ makes the whole blueprint invalid, with a message naming the verb to use.
 | Element | Attributes | Notes |
 |---|---|---|
 | `<mod>` | `name`\*, `version`\*, `priority` | one per file. `priority` defaults to 0; higher applies **earlier** |
-| `<requires installer=>` | `installer`\* | version constraint, e.g. `>=1.0.0`. **This installer is 1.0.0.** An unmet constraint skips your mod |
+| `<requires installer=>` | `installer`\* | version constraint, e.g. `>=1.0.0`. An unmet constraint skips your mod |
 | `<requires mod=>` | `mod`\*, `version` | matches another blueprint's `<mod name=>` — so `name` is an identity key, not a label: keep it stable across renames. Enforces order, and skips your mod if that one is absent. One `<requires>` takes `installer=` or `mod=`, not both |
 | `<ubBuildBlock>` | `name`\* | a `<block className=>` in `gui/unbound/markup.xml` |
 | `<ubBuildStyle>` | `name`\* | a `<css name=>` in `gui/unbound/styles.xml` |
