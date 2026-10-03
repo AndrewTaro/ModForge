@@ -13,7 +13,7 @@ from Installer import runInstaller
 from Logger import logInfo, logError
 
 __author__ = 'TTaro_'
-INSTALLER_VERSION = '1.0.0'
+INSTALLER_VERSION = '1.0.1'
 
 def _run():
     startedAt = time.time()

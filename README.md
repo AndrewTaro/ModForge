@@ -10,7 +10,7 @@ has no UI, and reverts every file to stock when removed.
 
 Writing a mod: start at [Writing a blueprint](#writing-a-blueprint).
 Porting one from ModsInstaller 4.3.1: start at
-[Converting a ModsInstaller 4.3.1 mod](#converting-a-modsinstaller-431-mod).
+[Porting a ModsInstaller 4.3.1 mod](#porting-a-modsinstaller-431-mod).
 Either way, read [Silent failures the client will not report](#silent-failures-the-client-will-not-report)
 before writing markup — most Unbound 1 mistakes have no symptom at all.
 
@@ -22,9 +22,8 @@ before writing markup — most Unbound 1 mistakes have no symptom at all.
 - [An Unbound 1 mod, whole](#an-unbound-1-mod-whole)
 - [Reading the log](#reading-the-log)
 - [What gets a mod refused](#what-gets-a-mod-refused)
-- [Converting a ModsInstaller 4.3.1 mod](#converting-a-modsinstaller-431-mod)
+- [Porting a ModsInstaller 4.3.1 mod](#porting-a-modsinstaller-431-mod)
 - [Silent failures the client will not report](#silent-failures-the-client-will-not-report)
-- [Working on ModForge](#working-on-modforge)
 
 ## What it does, in order
 
@@ -493,94 +492,63 @@ The faults that refuse, by code as the log names them:
 C10 checks against the classes of the build the player is running, read out of the client's own
 `consumer_main_scene.swf` once per build. If that cannot be read, C10 is skipped, not guessed.
 
-## Converting a ModsInstaller 4.3.1 mod
+## Porting a ModsInstaller 4.3.1 mod
 
-`ConvertV4.py` translates a v4 instruction file. It runs outside the game on plain CPython 2.7 or
-3.x, stdlib only. It lives in the author's private notes repo, not in this
-repository (paths below are relative to that repo):
+A v4 file is usually one of two shapes. One that edits some other vanilla file becomes a plain
+`<build file=>`.
 
-```bash
-py -3 ModForge/payload_tools/ConvertV4.py <v4-file-or-dir> <output-dir>
-```
-
-v4 files come in two main shapes. Which one dominates depends on the mod set: across one
-author's own 26, 22 were battle mounts; across a 110-mod third-party corpus, most were payload
-registrations. Check before assuming. A few edit other vanilla files (4 of the 110 edit
-`gui/battle_layout.xml`); those convert to a plain `<build file=>`.
-
-**Shape one: a `battle_elements.xml` insert.** Converts to a `<ubMountInBattle>` when the
-result installs byte for byte what the v4 insert did:
+**Shape one: a `battle_elements.xml` insert.** It becomes a `<ubMountInBattle>`:
 
 | v4 | blueprint |
 |---|---|
-| `<check name="X" version="Y"/>` | `<mod name="X" version="Y">` — the only place a v4 file carries its identity |
+| `<check name="X" version="Y"/>` | `<mod name="X" version="Y">` |
 | `<element class="lesta.unbound2.UbElement" elementName="X">` | `<ubMountInBattle unbound="2" rootElementId="X">` |
 | `<element class="lesta.libs.unbound.UnboundElement">` + a `<controller>` | `<ubMountInBattle unbound="1" …>` — it writes the controller too |
-| `name="unbound2MyThing"` on the element | `name="unbound2MyThing"` — **carry it over.** Omitted, it defaults to `rootElementId`, silently changing the client-internal instance name |
-| `<properties hitTest="true"/>` | `hitTest="true"` — always written, since the verb defaults to `false` |
+| `name="unbound2MyThing"` on the element | `name="unbound2MyThing"` — omitted, it defaults to `rootElementId` and silently renames the instance |
+| `<properties hitTest="true"/>` | `hitTest="true"` |
 | `url="x.swf"` on the element | `url="x.swf"` |
 | `<position insert="after_node" … value_1="MainHud"/>` | `after="MainHud"` |
-| `<do_if_not_exist …/>` | drop it — re-applying is idempotent |
+| `<do_if_not_exist …/>` | drop it |
 
-Anything the verb cannot express keeps the insert as a `<build file="gui/battle_elements.xml">`:
-an anchor on `name` rather than `elementName`, extra attributes or children, a real `<guard>`,
-or an Unbound 1 element without its controller. Across the 110-mod corpus, 26 of the 47
-`battle_elements.xml` mods convert to mounts.
+- **Keep the `<position>`.** It is render order, and losing it is silent.
+- Keep `<mod name=>` exactly as `<check name=>` had it. `<requires mod=>` resolves against it.
+- Several `<insert>`s become several `<ubMountInBattle>` in one `<mod>`.
+- The verb cannot express an anchor on `name` instead of `elementName`, extra attributes or
+  children, a `<guard>`, or an Unbound 1 element without its controller. Keep those as a
+  `<build file="gui/battle_elements.xml">`.
 
-**Do not drop the `<position>`.** It is render order, and losing it is silent.
+**Shape two: a `uss_settings.xml` registration.** Drop the registration: ModForge registers what
+it emits. What you port is the payload's content, as definitions.
 
-A v4 file with several `<insert>`s becomes several `<ubMountInBattle>` in one `<mod>` — that is
-fine, and better than inventing a second mod identity. Keep `<mod name=>` exactly as `<check
-name=>` had it even where that disagrees with the repo or element name; it is what
-`<requires mod=>` resolves against.
-
-**Shape two: a `uss_settings.xml` registration.** A v4 file that only registers a payload and
-touches nothing else maps to **no `<build>` and no mount at all** — ModForge registers what it
-emits, so the registration simply disappears. What survives is the payload's *content*, as
-definitions.
-
-**What it can and cannot see.** A v4 file is an *instruction* file. Where the mod shipped a
-prebuilt `.xml`/`.swf` pair and v4 merely registered it, nothing in the instruction describes what
-that payload defines — so the converter emits a `TODO` naming the files instead of guessing. That
-is the common case, not the exception.
-
-Finishing such a mod by hand:
-
-1. Open the payload the TODO names, e.g. `res_mods/gui/unbound/mods/aslain_link.xml`.
-2. Every **top-level** `<block className="X">` becomes `<ubBuildBlock name="X">`; every top-level
-   `<css name="$Y">` becomes `<ubBuildStyle name="$Y">`. Nested ones are not definitions — they are
-   inline children, and they come along with their parent.
-3. **Diff each one against the current `markup.xml`.** A v4 payload is normally a verbatim copy
-   of the vanilla definition with a handful of lines changed, so the diff *is* the mod. Three
-   shapes come out of it:
+1. Open the payload the v4 file registered, e.g. `res_mods/gui/unbound/mods/my_mod.xml`.
+2. Every **top-level** `<block className="X">` becomes `<ubBuildBlock name="X">`, and every
+   top-level `<css name="$Y">` becomes `<ubBuildStyle name="$Y">`. Nested ones come along with
+   their parent.
+3. **Diff each one against the current `markup.xml`.** A v4 payload is normally a copy of the
+   vanilla definition with a few lines changed, so the diff is the mod:
 
    | the payload's definition is | write |
    |---|---|
    | vanilla's, with edits | `<ubBuildBlock name="TheVanillaName">` + just those edits |
-   | vanilla's, under a different name | a verb with the new name + the `/*` copy form, then the edits |
+   | vanilla's, under a different name | a verb with the new name + the [`/*` copy form](#pulling-in-another-definition), then the edits |
    | entirely the mod's own | a verb with that name + `<insert into=".">` of its children |
 
-4. **Treat drift as deletion, not as a feature.** The payload froze vanilla at the build it was
-   made on, so a hunk that differs may be the author's intent *or* markup WG has since changed or
-   removed. Check whether the surrounding block still exists in current vanilla before carrying it
-   forward — a mechanical port of every difference silently resurrects markup the game deleted.
-   (Seen in the wild: a payload still carrying an `isEventShip` branch and an
+4. **Treat drift as deletion.** The payload froze vanilla at the build it was made on, so a
+   difference may be the author's intent or markup the game has since removed. Check that the
+   surrounding block still exists in current vanilla before carrying it forward. (Seen in the
+   wild: a payload still carrying an `isEventShip` branch and an
    `IDS_STEQ_EQUIPMENT_NOT_AVAILABLE` window that appear nowhere in either of the last two builds.)
 5. Delete the `.swf`. ModForge compiles one shared SWF for everything it emits.
 
-**Checking your work.** There is no offline validator in a public clone — the test suite and the
-dry-run harness live in the author's private notes repo. Your feedback loop is booting the client
-and reading `python.log`, so [Reading the log](#reading-the-log) is the section to keep open.
+A v4 file that assembled its payload instead of shipping one maps the same way:
 
-What the converter *does* handle mechanically: a v4 payload assembly (`<copy_past>` plus edits)
-becomes one definition verb per seeded block, because "copy vanilla X, edit it, register the file"
-and "`<ubBuildBlock name="X">` plus those edits" are the same thing. A republish — v4's
-`<rename attr_rename="className">` over a seeded copy — becomes the `/*` copy form above.
+| v4 | blueprint |
+|---|---|
+| `<copy_past>` of a vanilla block, plus edits | `<ubBuildBlock name="X">` plus those edits, one per copied block |
+| `<rename attr_rename="className">` over a copy | the `/*` copy form, under the new name |
+| a root-level op that searched the whole payload with `.//` | repeat it only in the definitions it matches — an action that matches nothing refuses the mod |
 
-The one construct it refuses to guess at is a root-level op that searched the **whole** v4 payload
-with `.//`. Each definition is its own document now, so the same action would have to be repeated
-in every one and would fail in each that has nothing matching, taking the mod with it. Those become
-a `TODO` naming the definitions involved.
+**Checking your work.** Boot the client and read `python.log`: see [Reading the log](#reading-the-log).
 
 ## Silent failures the client will not report
 
@@ -602,48 +570,3 @@ registers only what it just wrote. The `tpyo`, `verticle` and null-scope rows
 [refuse the mod](#what-gets-a-mod-refused) at install time, and the silent rows are reported
 without refusing. Uncaught AS3 errors *do* reach `python.log` as `ERROR: [Scaleform] Error: …`, so
 silence there is evidence.
-
-## Working on ModForge
-
-```
-PnFMods/ModForge/*.py      36 modules; the installer itself
-PnFMods/ModForge/Main.py   entry point, run once at game start
-ForgeBlueprints/           where blueprints are dropped at runtime
-```
-
-The test suite, mutation harness, ConvertV4 and the linter's sources live in the author's
-private notes repo, not here. The commands below are relative to it and find this repo on
-their own.
-
-| Command | Does |
-|---|---|
-| `py -2.7 ModForge/tools/run_tests.py` | the whole suite |
-| `py -2.7 ModForge/tools/run_tests.py merge` | one module (substring match) |
-| `py -2.7 ModForge/tools/mutate_merge.py` | break each load-bearing rule in turn; the suite must go red every time |
-| `py -2.7 ModForge/tools/dry_run_corpus.py` | install 110 real converted mods against a fake game tree |
-| `py -2.7 ModForge/tools/audit_sandbox_names.py` | every global the installer names, against the v1 sandbox vocabulary |
-| `py -3 ModForge/tools/stage_uss.py --check` | the shipped compiler and linter modules match their commented sources |
-| `py -2.7 ModForge/lint/test_ub1lint.py --staged` | the linter's fixtures, against the shipped copy |
-| `py -2.7 ModForge/lint/mutate_lint.py` | the linter's mutation run |
-
-**Python 2.7 only, by design** — that is the interpreter the game runs the installer on, and
-`PkgMgr` and `Paths.hashBytes` are Python 2 code. The suite refuses to run on 3.x rather than
-report a green run from the wrong interpreter.
-
-Constraints that come from the v1 mod sandbox, not from taste:
-
-- **`Exception` is the only exception class you can name.** A v1 mod's `__builtins__` is a fixed
-  dict; the other 48 are absent. `except (TypeError, ValueError):` sits dormant until the error
-  path runs and then *replaces* the real error with a `NameError`. Catch `Exception` and
-  discriminate inside the handler.
-- `eval`, `globals`, `locals` and `compile` are absent too.
-- `open` is mod-scoped, and outside the mod's own directory it returns `None` rather than raising —
-  the failure surfaces later as `'NoneType' object has no attribute …`. Every file the installer
-  touches is outside it, so all I/O goes through `Paths.openRead` / `Paths.openWrite`.
-- `.func_name`, not `.__name__`; `class Foo(Base, object):` for new-style inheritance.
-- `audit_sandbox_names.py` checks all of this by reading the source AST — run it, do not eyeball
-  it. A bytecode scan misses class bases, which Python 2 compiles as `LOAD_NAME` at module scope.
-
-**The mutation harness is the standard for "tested".** A rule nothing can break is a rule nothing
-pins: a surviving mutant once exposed a test that had been passing for the wrong reason. If you
-add a rule, add the mutant that proves it.
