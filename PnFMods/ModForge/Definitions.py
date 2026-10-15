@@ -7,7 +7,8 @@ from xml.dom import minidom as _minidom
 import Build
 import BlockSlice
 import Manifest
-from Actions import CLAIM_PREFIX, applyAction, stripClaims
+import Requires
+from Actions import CLAIM_PREFIX, applyAction, canonical, stripClaims
 from Logger import logError, logInfo
 
 class DefinitionError(Exception):
@@ -22,7 +23,9 @@ NAMESPACES = {
 
 _MISSING = object()
 
-def collect(orderedManifests):
+def collect(orderedManifests, versions=None):
+
+
 
 
 
@@ -31,6 +34,9 @@ def collect(orderedManifests):
     order = []
     for m in orderedManifests:
         for spec in m.definitions:
+            if versions is not None and not Requires.holds(
+                    spec.requirement, versions, Manifest.satisfiesConstraint):
+                continue
             key = (spec.namespace, spec.name)
             if key not in groups:
                 groups[key] = []
@@ -56,7 +62,7 @@ class Claims(object):
     def __init__(self):
         self.refused = []
 
-    def claim(self, node, attr, modName):
+    def claim(self, node, attr, modName, value=None):
         if not _NAME_RE.match(attr or ''):
 
 
@@ -64,7 +70,9 @@ class Claims(object):
         key = CLAIM_PREFIX + attr
         held = node.getAttribute(key) if node.hasAttribute(key) else None
         if held is not None and held != modName:
-            self.refused.append((modName, held, node.tagName, attr))
+
+            if value is None or node.getAttribute(attr) != value:
+                self.refused.append((modName, held, node.tagName, attr))
             return False
         node.setAttribute(key, modName)
         return True
@@ -96,15 +104,37 @@ class Merger(object):
         pristine = doc.cloneNode(True)
         claims = Claims()
         applied = []
+        several = len(set(m.modName for m, _spec in contributions)) > 1
+
+        signatures = {}
+        owners = {}
         try:
             for m, spec in contributions:
+                if several and m.modName not in owners:
+                    signature = self._alone(pristine, key, m, contributions)
+                    owners[m.modName] = signatures.get(signature)
+                    if signature is not None and owners[m.modName] is None:
+                        signatures[signature] = m.modName
+                twin = owners.get(m.modName)
+                if twin is not None:
+                    if not self.quiet:
+                        logInfo("'%s': its edits to %s are the ones '%s' "
+                                "already made; skipped"
+                                % (m.modName, label(namespace, name), twin))
+                    if twin in applied and m.modName not in applied:
+                        applied.append(m.modName)
+                        if appliedOut is not None:
+                            appliedOut.add(m.modName)
+                    continue
                 snapshot = doc.cloneNode(True)
                 refusedMark = len(claims.refused)
+                self._peerSkipped = False
                 try:
                     changed = self._contribute(doc, snapshot, pristine, m,
                                                spec, key, claims)
                     _checkShape(doc, namespace, name)
                 except Exception as exc:
+                    _forget(signatures, m.modName)
                     if not self.quiet:
                         logError("'%s' failed on %s: %s: %s"
                                  % (m.modName, label(namespace, name),
@@ -120,6 +150,10 @@ class Merger(object):
                     del claims.refused[refusedMark:]
                     continue
                 snapshot.unlink()
+                if self._peerSkipped or len(claims.refused) > refusedMark:
+
+
+                    _forget(signatures, m.modName)
                 if changed:
                     applied.append(m.modName)
                     if appliedOut is not None:
@@ -133,6 +167,29 @@ class Merger(object):
         finally:
             pristine.unlink()
             doc.unlink()
+
+    def _alone(self, pristine, key, m, contributions):
+
+
+
+
+
+
+
+        namespace, name = key
+        trial = pristine.cloneNode(True)
+        try:
+            for owner, spec in contributions:
+                if owner is not m:
+                    continue
+                for action in spec.actions:
+                    applyAction(trial, action, '',
+                                _element(trial, namespace, name), self.sources)
+            return canonical(_element(trial, namespace, name))
+        except Exception:
+            return None
+        finally:
+            trial.unlink()
 
     def _contribute(self, doc, snapshot, pristine, m, spec, key, claims):
         namespace, name = key
@@ -149,6 +206,7 @@ class Merger(object):
                                     'what it names)' % exc)
                 if blame != 'peer':
                     raise
+                self._peerSkipped = True
                 if not self.quiet:
                     logInfo("'%s': %s on %s skipped -- a mod applied before it "
                             "changed what that names (%s)"
@@ -227,6 +285,11 @@ class Merger(object):
                                                tag, attr))
             self._allNames[key] = names
         return name in names
+
+def _forget(signatures, modName):
+    for signature in [s for s, owner in signatures.items()
+                      if owner == modName]:
+        del signatures[signature]
 
 def _emptyDoc(tag, attr, name):
     doc = _minidom.parseString('<ui/>')

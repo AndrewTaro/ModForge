@@ -11,9 +11,10 @@ from xml.dom import minidom
 
 from Installer import runInstaller
 from Logger import logInfo, logError
+from Restart import restartClient
 
 __author__ = 'TTaro_'
-INSTALLER_VERSION = '1.0.1'
+INSTALLER_VERSION = '1.2.0'
 
 def _run():
     startedAt = time.time()
@@ -39,5 +40,7 @@ def _run():
             % (stats.definitions, stats.definitionsNew,
                stats.definitions - stats.definitionsNew,
                stats.definitionsDropped))
+    if stats.restartFor:
+        restartClient(stats.restartFor)
 
 _run()

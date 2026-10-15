@@ -10,6 +10,7 @@ class Transaction(object):
     def __init__(self):
         self._pending = {}
         self._committed = {}
+        self.changed = set()
 
     def stage(self, absPath, newBytes):
         priorBytes = None
@@ -37,7 +38,10 @@ class Transaction(object):
             raise
         else:
             for absPath in written:
-                self._committed[absPath] = self._pending[absPath][1]
+                newBytes, prior = self._pending[absPath]
+                self._committed[absPath] = prior
+                if newBytes != prior:
+                    self.changed.add(absPath)
         finally:
             self._sweepTempFiles(self._pending.keys())
 
@@ -60,6 +64,7 @@ class Transaction(object):
             except Exception as exc:
                 logError('revert failed for %s: %s' % (absPath, exc))
         self._committed.clear()
+        self.changed.clear()
 
     def _atomicWrite(self, absPath, data):
         Paths.ensureDir(Paths.dirName(absPath))

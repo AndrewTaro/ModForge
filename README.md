@@ -18,8 +18,9 @@ before writing markup — most Unbound 1 mistakes have no symptom at all.
 
 - [What it does, in order](#what-it-does-in-order)
 - [Features](#features)
-- [Writing a blueprint](#writing-a-blueprint) — [schema reference](#schema-reference), [selectors](#selectors), [actions](#actions)
+- [Writing a blueprint](#writing-a-blueprint) — [schema reference](#schema-reference), [conditions on other mods](#conditions-on-other-mods), [selectors](#selectors), [actions](#actions)
 - [An Unbound 1 mod, whole](#an-unbound-1-mod-whole)
+- [Optional integration with another mod](#optional-integration-with-another-mod)
 - [Reading the log](#reading-the-log)
 - [What gets a mod refused](#what-gets-a-mod-refused)
 - [Porting a ModsInstaller 4.3.1 mod](#porting-a-modsinstaller-431-mod)
@@ -29,12 +30,15 @@ before writing markup — most Unbound 1 mistakes have no symptom at all.
 
 1. **Discover** every blueprint directly in `res_mods/ForgeBlueprints/` (subfolders are not
    searched) and every `res_mods/PnFMods/*/manifest.xml`.
-2. **Check each mod** — installer version, mod dependencies, and that it does not write a file
-   [Unbound owns](#the-primitives). A mod that fails a check is skipped alone.
+2. **Check each mod** — installer version, its [`<requires mods=>`](#conditions-on-other-mods)
+   condition, and that it does not write a file [Unbound owns](#the-primitives). A mod that fails a
+   check is skipped alone.
 3. **Order** by dependency, then `priority`, then filename.
 4. **Merge each Unbound 1 definition** every blueprint names — one document per `<block>` or
-   `<css>`, sliced from the current build and carrying every mod's edits to it — then compile one
-   shared `.swf`, [lint](#what-gets-a-mod-refused) what it merged, and register what passed.
+   `<css>`, sliced from the current build and carrying every mod's edits to it, less the blocks
+   whose own `<requires mods=>` does not hold and the edits an earlier mod
+   [already made](#an-unbound-1-mod-whole) — then compile one shared `.swf`,
+   [lint](#what-gets-a-mod-refused) what it merged, and register what passed.
 5. **Check file references** — a mod whose payload names an `<xmlfile>` or `<swffile>` that is
    not on disk is skipped alone.
 6. **Fetch the pristine original** of each target file (from `res/`, or unpacked from the `.pkg`).
@@ -76,8 +80,8 @@ Ship it as `res_mods/PnFMods/<YourMod>/manifest.xml`, or drop it directly in
 sound; the XML ModForge can build for you.
 
 ```xml
-<mod name="My Mod" version="1.0.0" priority="0">
-  <requires installer=">=1.0.0"/>            <!-- or: <requires mod="Other" version=">=2.0"/> -->
+<mod name="MyMod" version="1.0.0" priority="0">
+  <requires installer=">=1.1.0"/>            <!-- and: <requires mods="Other>=2.0"/> -->
   <build file="gui/battle_elements.xml">
     <insert into="elementList">
       <element name="myClip" class="MyClip"/>
@@ -97,29 +101,90 @@ absolute path or one containing `..` makes the blueprint invalid.
 
 Every element a blueprint may contain at the top level; the five actions that go *inside* them
 are in [Actions](#actions). An unknown **element** and an unknown **attribute** are both ignored
-with an info line and nothing else — a typo is quiet, so read the log after a change. The
-exception is `<ubBuild>`, `<ubCompile>` and `<ubRegister>`, verbs from before 1.0.0: any of them
-makes the whole blueprint invalid, with a message naming the verb to use.
+with an info line and nothing else — a typo is quiet, so read the log after a change. Two
+exceptions make the whole blueprint invalid, with a message showing what to write instead:
+`<ubBuild>`, `<ubCompile>` and `<ubRegister>`, verbs from before 1.0.0; and `mod=` or `version=`
+on a `<requires>`, which ignored would install the mod with no requirement at all.
 
 | Element | Attributes | Notes |
 |---|---|---|
-| `<mod>` | `name`\*, `version`\*, `priority` | one per file. `priority` defaults to 0; higher applies **earlier** |
-| `<requires installer=>` | `installer`\* | version constraint, e.g. `>=1.0.0`. An unmet constraint skips your mod |
-| `<requires mod=>` | `mod`\*, `version` | matches another blueprint's `<mod name=>` — so `name` is an identity key, not a label: keep it stable across renames. Enforces order, and skips your mod if that one is absent. One `<requires>` takes `installer=` or `mod=`, not both |
+| `<mod>` | `name`\*, `version`\*, `priority` | one per file. `name` is an identifier — letters, digits and `_`, not starting with a digit, and not `and`, `or` or `not` in any letter case; anything else makes the blueprint invalid. It is what another blueprint's `mods=` names, case-sensitively, so keep it stable. `version` has to start with a number (`1.2`, not `v1.2`) or every constraint on it fails. Use `major.minor.patch`: more numbers still work but are logged. `priority` defaults to 0; higher applies **earlier** |
+| `<requires installer=>` | `installer`\* | version constraint, e.g. `>=1.1.0`. An unmet constraint skips your mod. Directly under `<mod>` only; inside a block it makes the blueprint invalid |
+| `<requires mods=>` | `mods`\* | a [condition on other mods](#conditions-on-other-mods). Under `<mod>` it skips your mod when it does not hold, and enforces order. Also a direct child of `<build file=>` (not with `root=`), `<ubBuildBlock>`, `<ubBuildStyle>` and `<ubMountInBattle>`, where it skips that block alone. One `<requires>` takes `installer=` or `mods=`, not both |
 | `<ubBuildBlock>` | `name`\* | a `<block className=>` in `gui/unbound/markup.xml` |
 | `<ubBuildStyle>` | `name`\* | a `<css name=>` in `gui/unbound/styles.xml` |
 | `<ubMountInBattle>` | `unbound`\*, `rootElementId`\*, `name`, `hitTest`, `url`, `before` \| `after` | writes the `battle_elements.xml` entries |
-| `<build>` | `file`\*, `root` | edit a vanilla file; with `root=` generate a new one |
+| `<build>` | `file`\*, `root`, `restartOnChange` | edit a vanilla file; with `root=` generate a new one. `restartOnChange="true"`: see [Files the client reads before mods load](#files-the-client-reads-before-mods-load) |
 | `<guard>` | `ifExists` \| `ifNotExists` | inside a `<build>` with no `root=`; position does not matter |
 
 \* required. `A` \| `B` means one or the other; giving both makes the blueprint invalid.
 
-Names are **opaque and verbatim**. `$Foo` and `Foo` are different presets; nothing normalises the
-`$`, because the client does not either — it is convention, not grammar.
+Definition names are **opaque and verbatim**. `$Foo` and `Foo` are different presets; nothing
+normalises the `$`, because the client does not either — it is convention, not grammar.
 
 A definition verb may not carry a `<guard>`, and neither may a `root=` build. Both are refused
 outright rather than treated as a condition that is always false: a guard reads the document it
 edits, and those two start from a definition or from nothing.
+
+### Conditions on other mods
+
+`mods=` is an expression over other blueprints' `<mod name=>`:
+
+```xml
+<requires mods="ModA"/>
+<requires mods="ModA>=1.2 and not ModB"/>
+<requires mods="(ModA&lt;2.0 or ModB) and !ModC"/>
+```
+
+| | |
+|---|---|
+| a name | true when that mod is installed |
+| `Name>=1.2` | installed, and its `<mod version=>` meets the constraint: `>=`, `<=`, `==`, `>`, `<` |
+| `not X`, `!X` | the same thing |
+| `X and Y`, `X or Y` | `and` binds tighter: `A or B and C` is `A or (B and C)` |
+| `( … )` | grouping |
+
+- **`<` is `&lt;`** in an XML attribute; written raw, the file is not XML and the whole blueprint
+  is invalid.
+- **Anything else is an error, and an error makes the blueprint invalid**: a lone `=`, `!=`, `&&`,
+  `||`, a comma, `AND` in capitals, a version with anything but digits and dots.
+- **`not ModA>=2.0` is also true when ModA is absent.** For "ModA is here and older than 2.0"
+  write `ModA<2.0`.
+- **Several `<requires mods=>` in one place all have to hold.**
+- **It has to be a direct child.** Inside an `<insert>` or `<replace>` it is payload, and is
+  written into the game file.
+
+**Installed** means the mod passed its own checks in this run. A mod that is on disk but was
+itself skipped is not installed, so `not X` holds for it.
+
+**Under `<mod>`** an unmet condition skips your whole mod, and your mod is ordered after every mod
+the condition names outside a `not`, whatever the priorities. With `A or B` that is after each of
+the two that is present. Mods whose conditions name each other in a circle — `A` needs `B` and
+`B` needs `A`, or each says `not` the other — are all skipped, and the log names them.
+
+**Inside a block** it skips that block and the rest of your mod installs. It never changes the
+order. To put one action under a condition, give it a block of its own: a mod may name the same
+definition, or the same file, in several blocks. A `root=` build takes none: it is written before
+any mod can be refused, so put the condition under `<mod>`, in a blueprint of its own.
+
+```xml
+<ubBuildBlock name="PortSwitcher">
+  <setAttribute select=".//bind[@name='text']" attribute="value" to="'Hello'"/>
+</ubBuildBlock>
+<ubBuildBlock name="PortSwitcher">
+  <requires mods="not OtherSwitcher"/>
+  <insert into="."><bind name="alpha" value="0.8"/></insert>
+</ubBuildBlock>
+```
+
+A mod [refused](#what-gets-a-mod-refused) after the checks, while the definitions are built,
+splits the two scopes. Inside a definition verb, a `<ubMountInBattle>` or a `<build file=>` edit it
+counts as absent: a block under `mods="X"` drops out and one under `mods="not X"` comes in. A mod
+already skipped under `<mod>` for `not X` stays skipped.
+
+**Carry `<requires installer=">=1.1.0"/>` in any blueprint that uses `mods=`.** ModForge 1.0.x
+reads `mods=` and a `<requires>` inside a block as unknown, logs an info line, and installs
+everything unconditionally.
 
 ### An Unbound 2 mod, whole
 
@@ -149,7 +214,7 @@ An Unbound 1 mod redefines a **definition** — a `<block className=>` in
 and list the changes:
 
 ```xml
-<mod name="My Mod" version="1.0.0">
+<mod name="MyMod" version="1.0.0">
   <ubBuildBlock name="PortSwitcher">
     <setAttribute select=".//bind[@name='text']" attribute="value" to="'Hello'"/>
   </ubBuildBlock>
@@ -171,13 +236,20 @@ define the same name with the last one loaded winning.
 
 Where they genuinely collide, `priority` decides and the run says so:
 
-- **Same attribute of the same element.** The higher `priority` wins; the loser is named in
-  `python.log` and its *other* edits still land. Nothing is silently overwritten.
+- **Same attribute of the same element, different values.** The higher `priority` wins; the loser
+  is named in `python.log` and its *other* edits still land. Nothing is silently overwritten. Two
+  mods writing the same value agree: no line, and not counted in `conflicts=`.
 - **One mod removes what another edits.** That one selector is skipped, reported, and the rest of
   the mod still applies. The action is replayed to tell this apart from your own errors: a
   selector that matches nothing in vanilla either, or a node your own earlier action removed.
   Those fail your mod — not just that definition, but every definition it names, and its other
   edits in the same run.
+- **Two mods make the same edits.** When everything a later mod does to a definition, applied
+  alone to vanilla, gives what an earlier mod's edits give, the later mod is skipped for that
+  definition, said in an info line, and still counts as installed. This is what lets two mods ship
+  the same shared block. It compares the whole contribution, so a mod that does more is not a
+  match and merges as usual. It also covers edits by position: two mods each removing `./x[1]`
+  remove one node, not two.
 
 The baseline is sliced out of the build the player is running, every launch, so nothing in your
 mod is a frozen copy of vanilla.
@@ -240,6 +312,33 @@ rename it — it **nests** it, so your definition ends up with the vanilla block
 and renders one layout level deeper than you meant. It will not error; check the emitted file if
 the layout looks off by a container.
 
+### Optional integration with another mod
+
+A bind that constructs a block by name is [refused (E2)](#what-gets-a-mod-refused) when nothing
+defines that name — so a reference to another mod's block refuses *your* mod on every client
+without that mod. Three ways to write it:
+
+- **Put the bind in a block of its own, under a condition.** It is only merged, and only linted,
+  when the other mod is installed:
+  ```xml
+  <ubBuildBlock name="Host">
+    <requires mods="Port_Interface_MainCrew"/>
+    <insert into=".">
+      <bind name="instance" value="'ON_MainCrewIcon'; {}"/>
+    </insert>
+  </ubBuildBlock>
+  ```
+- **Let the other mod do it.** Its blueprint names your block and inserts the bind itself; yours
+  never mentions it.
+- **"Theirs if present, else vanilla's"** is two blocks, one under `mods="X"` and one under
+  `mods="not X"`.
+
+A name the lint cannot read as a literal — `flag ? 'ON_MainCrewIcon' : null` — is not checked at
+all. It installs, and throws in the client when the other mod is missing.
+
+This is not what a [`<guard>`](#actions) is for. A guard reads the document being edited;
+`<requires mods=>` reads which mods are installed.
+
 ### Showing it in battle
 
 A registered definition is loaded by the client; that alone does not put anything on screen in
@@ -300,6 +399,29 @@ with:
 |---|---|
 | `<build file="…">` | Edit a vanilla file, starting from its pristine copy. |
 | `<build file="…" root="ui">` | Generate a new file, starting from an empty `<ui>` document. |
+
+### Files the client reads before mods load
+
+ModForge runs after the client has already read some files, among them `engine_config.xml` and
+`camerasConsumer.xml`. An edit to one of those takes effect only on the next start. Mark its `<build>` with `restartOnChange="true"` and ModForge restarts the client itself:
+
+```xml
+<requires installer=">=1.2.0"/>
+<build file="engine_config.xml" restartOnChange="true">
+  ...
+</build>
+```
+
+- It restarts only when the bytes of that file actually change: on install, on an update that
+  changes the file, and when removing the blueprint restores the stock file. A run that leaves the
+  file as it was does not restart.
+- Before restarting it shows a Windows notification that the game is restarting. The text is
+  translated through [LocalizationLoader](https://github.com/AndrewTaro/LocalizationLoader);
+  without it, the notification shows its key, `IDS_MODFORGE_RESTARTING`.
+- If something else rewrites the file before every start, ModForge restarts for that content once,
+  then logs an error instead of restarting on every boot.
+
+An older ModForge ignores the attribute with an info line, so carry the `<requires installer=>`.
 
 `<build file=>` is for the vanilla files no definition-keyed verb covers — `gui/battle_layout.xml`
 and the like. `<ubBuildBlock>` and `<ubBuildStyle>` are not built on it: they have a pipeline of
@@ -375,15 +497,17 @@ The body of a `<build>` or either definition verb:
 
 | Action | Does |
 |---|---|
-| `<insert into="sel">…</insert>` | Add children into the parent. `before=`/`after=` place them, and that selector is evaluated **with the `into=` node as its root** — so a bare step like `bind[@name='x']` means a *child* of it, and `.//bind[…]` is needed for anything deeper. Without either, children are appended. Identical re-inserts are skipped. |
+| `<insert into="sel">…</insert>` | Add children into the parent. `before=`/`after=` place them, and that selector is evaluated **with the `into=` node as its root** — so a bare step like `bind[@name='x']` means a *child* of it, and `.//bind[…]` is needed for anything deeper. Without either, children are appended. A child identical to one already in that parent is skipped, whichever mod put it there. |
 | `<remove select="sel"/>` | Delete matched nodes. |
 | `<replace select="sel">…</replace>` | Swap matched nodes for the supplied elements. |
 | `<setAttribute select="sel" attribute="a" to="v"/>` | Set attribute `a`, adding it if absent. With `from="old"` it replaces **every** occurrence of that substring instead, and does nothing at all where the substring is absent — silently, so check your result. `select=` may be omitted, which targets the node the action is scoped to. |
-| `<copy select="sel" into="sel">…</copy>` | Clone nodes, from this file or from `from="…"`. Children are actions on the clone. |
+| `<copy select="sel" into="sel">…</copy>` | Clone nodes, from this file or from `from="…"`. Children are actions on the clone. A clone identical to a node another mod already put in the same parent is skipped; a mod's own repeated copies are kept. |
 
 A `<guard ifExists="sel"/>` or `<guard ifNotExists="sel"/>` anywhere inside a `<build>` skips the
-whole build unless the condition holds. Reach for a guard only for real conditional logic (e.g. patch differently
-depending on another mod). You don't need one to avoid installing twice: re-applying is idempotent —
+whole build unless the condition holds. Reach for a guard only for real conditional logic on the
+file's content (e.g. patch differently depending on what an earlier mod left in it). Whether
+another mod is *installed* is a [`<requires mods=>`](#conditions-on-other-mods) inside the build,
+not a guard. You don't need one to avoid installing twice: re-applying is idempotent —
 identical inserts are skipped, and an unchanged run is a no-op — so the old "skip if my element
 already exists" guard is unnecessary.
 
@@ -396,10 +520,11 @@ Worth knowing:
 
 - **Edits stack on the pristine original, in order.** Each file starts from the vanilla copy;
   mods apply one after another. A higher `priority` runs earlier, so a later mod's selectors can
-  match — and edit — what an earlier one added. Use `<requires mod=…>` when you truly depend on
-  another mod: it both enforces order and skips your mod if that mod is absent.
-- **Two mods setting the same attribute: the higher `priority` wins, in every file.** The first
-  write stands, the later one is refused, and the loser is named in `python.log`.
+  match — and edit — what an earlier one added. Use `<requires mods=…>` under `<mod>` when you
+  truly depend on another mod: it both enforces order and skips your mod if that mod is absent.
+- **Two mods setting the same attribute to different values: the higher `priority` wins, in every
+  file.** The first write stands, the later one is refused, and the loser is named in
+  `python.log`.
 - **Failures are contained, not silent.** In a `<build file=>` edit, a selector that matches
   nothing (or any other error) reverts your mod's edits to that one file, and the rest still
   install. A failure in a `root=` build or a definition verb drops your mod from the whole run.
@@ -416,17 +541,28 @@ Every line is prefixed `[ModForge]` in `python.log`. The ones worth reacting to:
 | Line | Means | Do |
 |---|---|---|
 | `created <ubBuildBlock name='X'>` where you meant to override | the build has no `X` | check the spelling, or whether the patch renamed it |
-| `'A' cannot set v on <bind> in …: 'B' set it first` | two mods want the same attribute, in a definition or a file | raise your `priority`, or accept B's value |
+| `invalid manifest …: <mod name='X'>: a mod name is letters, digits and _ only, and does not start with a digit` | the name is not an identifier (or: `'and', 'or' and 'not' are reserved`) | rename it, and every `mods=` that names it — the blueprint was not read |
+| `invalid manifest …: <requires mod=> and version= are gone; write <requires mods='Other>=2.0'/>` | the two attributes are refused | write what the message shows — the blueprint was not read. For a name that is not an identifier it shows `Name` and says to rename that mod |
+| `invalid manifest …: <requires mods='…'> in <mod>: …` | the expression does not parse; the end says why, and `in …` names the block | fix it — the blueprint was not read |
+| `'N' requires mods 'A>=2.0 and B and C', which does not hold (A 1.0 is installed; B is not installed; C is present but was itself skipped); skipping` | your `<mod>`-level condition is not met; the brackets give what was found for each name | install what is missing, or it is working as written |
+| `'A': <requires mods='X'> does not hold; skipping its edits to <ubBuildBlock name='P'>` (or `… to gui/file.xml`) | a block's own condition is not met | expected; the rest of `A` installed. Printed on a run that rebuilds, not on a `nothing to do` one |
+| `'B': its edits to <ubBuildBlock name='P'> are the ones 'A' already made; skipped` | both mods make the same edits to `P` | expected; `B` counts as installed |
+| `'A', 'B' name each other in <requires mods=>, in a circle; skipping them` | each waits for the other, or each says `not` the other | drop one of the conditions |
+| `B: <style> is already in <block>, from 'A'; skipped` | a `<copy>` would add a node `A` already added | expected |
+| `'A' cannot set v on <bind> in …: 'B' set it first` | two mods want different values for the same attribute, in a definition or a file | raise your `priority`, or accept B's value |
 | `… skipped -- a mod applied before it changed what that names` | a peer removed what your selector named | usually fine; your other edits landed |
 | `'A' failed on <ubBuildBlock name='X'>: ActionError: … matched nothing` | your selector matches nothing in vanilla either | fix the selector — your mod was dropped from the run |
 | the same, ending `(an earlier action of this mod changed what it names)` | one of your own earlier actions removed or changed the node | reorder or fix your own actions |
 | `the first step of '…' matches N nodes in …` | a `<copy from=>` selector is ambiguous | add a predicate or `[1]` to the first step |
 | `'A' references missing file: …` | a payload names an `<xmlfile>`/`<swffile>` that is not on disk | ship the file or fix the path — the mod was skipped |
-| `<ubMountInBattle hitTest='…'> is not true or false; using false` | a typo in `hitTest=` | write `true` or `false` |
+| `X: version='24.3.1.2.50' has 5 numbers; use major.minor.patch, like 1.2.0` | the version has more than three numbers | nothing was refused, and it still compares; shorten it |
+| `<ubMountInBattle hitTest='…'> is not true or false; using false` | a typo in `hitTest=` (or in `restartOnChange=`) | write `true` or `false` |
+| `X changed; restarting the client so it takes effect` | a `restartOnChange` file was written | expected; the client comes back on its own |
+| `X changed again to the content the client was already restarted for; not restarting again` | something else rewrites `X` before every start | find what writes it; ModForge will not loop |
 | `<ubBuildBlock name='X'> would throw (C1 at …): …; not installing 'A'` | your edit adds markup the client throws on (or `would stall`: hangs at login) | fix what it names — mod `A` was not installed. See [below](#what-gets-a-mod-refused) |
 | `<ubBuildBlock name='X'>: dead D1 at …: …` | your edit adds markup the client silently ignores | nothing was refused; fix it or delete it |
 | `X does not compile; not installing 'A'` | an expression in the definition does not compile | the reason is logged above it; mod `A` was not installed |
-| `'N' requires mod 'M', which failed; skipping` | `M` was refused at build time | fix `M`; `N` comes back on its own |
+| `'N' requires mod 'M', which failed; skipping` | `M` was refused at build time, and `N`'s condition does not hold without it | fix `M`; `N` comes back on its own |
 | `cannot check names against gui/unbound/…: …` | a vanilla source could not be read | the name checks were skipped for this run; everything else ran |
 | `read N classes from gui/flash/consumer_main_scene.swf` | the first run on a new build read the client's classes for C10 | expected, once per build |
 | `cannot inflate …` / `cannot read the classes of …` / `… yielded N classes and no UbController` | the client's class list could not be read | C10 is skipped for this run; nothing was refused for it |
@@ -448,7 +584,7 @@ definitions: 4 registered (1 created, 3 overridden), 0 dropped
 
 On a run that completes, every discovered mod lands in exactly one of `installed`, `updated`,
 `unchanged`, `noop`, `skipped` and `failed`. `noop` is a mod that ran without error and changed nothing: every edit
-was guard-blocked, already present, or lost a conflict. A mod left out because one it requires
+was guard-blocked, already present, lost a conflict, or sat in a block whose `<requires mods=>` did not hold. A mod left out because one it requires
 failed counts as `skipped`. `dropped` counts definitions that would have been registered but for a
 mod that failed.
 
@@ -459,7 +595,10 @@ A mod is refused when an edit it makes to a definition would make the client **t
 The whole mod goes, never one definition: its other definitions may name what that one added,
 and would throw without it. Then, in turn:
 
-- **A mod that requires it** is skipped.
+- **A mod that requires it** is skipped, unless its condition still holds without it
+  (`mods="It or Other"`).
+- **A block conditioned on it** drops out, or under `not` comes in, and the definitions are merged
+  again. See [Conditions on other mods](#conditions-on-other-mods).
 - **A mod that names a definition only it created** — `child`, `instance`, `tooltip` and the like
   pointing at it — is refused too, since that name no longer exists.
 
@@ -484,7 +623,7 @@ The faults that refuse, by code as the log names them:
 | C8 | a `style` binding naming no style property | `#1006` |
 | C10 | `controller` naming a class the scene lacks, or one that is not a controller | `#1065` / `#1034` |
 | C13 | a verb that needs an Unbound block, on a native block | `#1009` |
-| E2 | a name nothing defines, where the binding constructs it | `missing construction plan` |
+| E2 | a name nothing defines, where the binding constructs it. For a name another mod defines, see [Optional integration with another mod](#optional-integration-with-another-mod) | `missing construction plan` |
 | F1 | `flow`, `position`, `overflow`, `backgroundSize`, `textAlign`, `scrollbarAlign` outside their values | hangs at login |
 | F6 | `background9Slice` / `userData` reading an identifier | hangs at login |
 | F7 | an `aw`/`ah` size without its two breakpoints | hangs at login |
@@ -501,7 +640,7 @@ A v4 file is usually one of two shapes. One that edits some other vanilla file b
 
 | v4 | blueprint |
 |---|---|
-| `<check name="X" version="Y"/>` | `<mod name="X" version="Y">` |
+| `<check name="X" version="Y"/>` | `<mod name="X" version="Y">`, with `X` made an identifier |
 | `<element class="lesta.unbound2.UbElement" elementName="X">` | `<ubMountInBattle unbound="2" rootElementId="X">` |
 | `<element class="lesta.libs.unbound.UnboundElement">` + a `<controller>` | `<ubMountInBattle unbound="1" …>` — it writes the controller too |
 | `name="unbound2MyThing"` on the element | `name="unbound2MyThing"` — omitted, it defaults to `rootElementId` and silently renames the instance |
@@ -511,7 +650,9 @@ A v4 file is usually one of two shapes. One that edits some other vanilla file b
 | `<do_if_not_exist …/>` | drop it |
 
 - **Keep the `<position>`.** It is render order, and losing it is silent.
-- Keep `<mod name=>` exactly as `<check name=>` had it. `<requires mod=>` resolves against it.
+- **`<check name=>` rarely survives verbatim.** A mod name is letters, digits and `_`, so
+  `Move Port Clock` becomes `Move_Port_Clock`. `<requires mods=>` resolves against the new
+  spelling, case-sensitively, so every blueprint that names the mod has to use the same one.
 - Several `<insert>`s become several `<ubMountInBattle>` in one `<mod>`.
 - The verb cannot express an anchor on `name` instead of `elementName`, extra attributes or
   children, a `<guard>`, or an Unbound 1 element without its controller. Keep those as a

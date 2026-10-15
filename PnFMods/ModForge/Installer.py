@@ -14,6 +14,7 @@ import Validate
 from Actions import applyAction, evaluateGuards
 from Logger import logInfo, logError
 import Planner
+import Requires
 from Planner import (
     discoverManifests, summarizePlan, topoSort, unboundOwnedTargets,
     validateFileReferences, validateRequirements, validateTargets,
@@ -35,6 +36,8 @@ class _Stats(object):
         self.definitionsDropped = 0
         self.conflicts = 0
 
+        self.restartFor = []
+
 def runInstaller(installerVersion):
     stats = _Stats()
     Paths.ensureDir(Paths.cacheDir())
@@ -51,6 +54,7 @@ def runInstaller(installerVersion):
     recordedStamps = registry.get('stamps', {})
     recordedLint = registry.get('linted', {})
     recordedOutputs = registry.get('outputs', {})
+    recordedRestart = registry.get('restart', {})
     oldHashes = registry.get('mods', {})
     if not manifests:
         stats.removed = _reportRemoved(oldHashes, {})
@@ -62,10 +66,14 @@ def runInstaller(installerVersion):
             logError('transaction commit failed: %s' % exc)
             Resources.shutdown()
             return stats
+        dropped = []
         if _registrationSettled(recordedOutputs, reverted):
-            _dropOrphanedCompiles(wasCompiled, {})
+            dropped = _dropOrphanedCompiles(wasCompiled, {})
         Validate.removeStubs()
-        return _finalize(registry, [], stats, installerVersion)
+        stats.restartFor, restart = _decideRestart(
+            set(), recordedRestart, [tx], dropped)
+        return _finalize(registry, [], stats, installerVersion,
+                         restart=restart)
 
     newHashes = dict((m.modName, m.sourceHash) for m in manifests)
     changed = newHashes != oldHashes
@@ -123,7 +131,13 @@ def runInstaller(installerVersion):
 
     eligible = [m for m in eligible
                 if m.modName not in compileFailed and m.modName not in dependents]
-    eligible = [m for m in eligible if validateFileReferences(m)]
+
+
+    versions = Planner.installedVersions(eligible)
+    held = dict((m.modName, _heldBuilds(m, versions)) for m in eligible)
+    _reportHeldDefinitions(eligible, versions)
+    eligible = [m for m in eligible
+                if validateFileReferences(m, held[m.modName])]
     ordered = topoSort(eligible)
     summarizePlan(ordered)
     stats.failed = len(compileFailed)
@@ -132,7 +146,8 @@ def runInstaller(installerVersion):
     applied = set(definitionApplied)
     failed = set()
     forgeFailed = set()
-    contributors = [(m.modName, m.builds, applied, failed) for m in ordered]
+    contributors = [(m.modName, held[m.modName], applied, failed)
+                    for m in ordered]
     if registration is not None:
         contributors.append((FORGE, [registration], set(), forgeFailed))
 
@@ -192,15 +207,79 @@ def runInstaller(installerVersion):
 
 
 
+    dropped = []
     if _registrationSettled(recordedOutputs,
                             reverted + [rel for rel, _data in staged]):
-        _dropOrphanedCompiles(wasCompiled, declared)
+        dropped = _dropOrphanedCompiles(wasCompiled, declared)
 
+    stats.restartFor, restart = _decideRestart(
+        _restartFiles(eligible), recordedRestart, [payloadTx, tx], dropped)
     successful = [m for m in ordered if m.modName not in failed]
     return _finalize(registry, successful, stats, installerVersion,
-                     Guard.outputHashes(staged), compiled, linted)
+                     Guard.outputHashes(staged), compiled, linted, restart)
 
 FORGE = 'ModForge'
+
+def _reportHeldDefinitions(manifests, versions):
+
+
+    import Definitions
+    for m in manifests:
+        for spec in m.definitions:
+            if not Planner.requirementHolds(spec.requirement, versions):
+                logInfo("'%s': <requires mods='%s'> does not hold; skipping "
+                        "its edits to %s"
+                        % (m.modName, Requires.describe(spec.requirement),
+                           Definitions.label(spec.namespace, spec.name)))
+
+def _heldBuilds(m, versions):
+    out = []
+    for spec in m.builds:
+        if Planner.requirementHolds(spec.requirement, versions):
+            out.append(spec)
+        else:
+            logInfo("'%s': <requires mods='%s'> does not hold; skipping its "
+                    "edits to %s" % (m.modName,
+                                     Requires.describe(spec.requirement),
+                                     spec.file))
+    return out
+
+def _restartFiles(manifests):
+    return set(spec.file for m in manifests for spec in m.builds
+               if spec.restartOnChange)
+
+def _decideRestart(flagged, recorded, txs, dropped):
+
+
+
+
+
+
+    changedAbs = set()
+    for tx in txs:
+        changedAbs |= tx.changed
+    changed = []
+    for relPath in sorted(flagged | set(recorded)):
+        if (relPath in dropped
+                or Paths.resolveResModsTarget(relPath) in changedAbs):
+            changed.append(relPath)
+    record = dict((p, recorded.get(p, '')) for p in flagged)
+    if not changed:
+        return [], record
+    current = dict((p, _contentHash(p)) for p in changed)
+    if not [p for p in changed if recorded.get(p) != current[p]]:
+        logError('%s changed again to the content the client was already '
+                 'restarted for; not restarting again. Something else rewrites '
+                 'it on every boot.' % ', '.join(changed))
+        return [], record
+    for p in changed:
+        if p in record:
+            record[p] = current[p]
+    return changed, record
+
+def _contentHash(relPath):
+    absPath = Paths.resolveResModsTarget(relPath)
+    return (absPath and Paths.hashFile(absPath)) or 'absent'
 
 def _reportRemoved(oldHashes, newHashes):
     removedNames = [name for name in oldHashes if name not in newHashes]
@@ -431,10 +510,15 @@ def _requirementsHold(manifests, failedNames, dependents):
            if m.modName not in failedNames and m.modName not in dependents]
     while True:
         gone = failedNames | dependents
+        versions = Planner.installedVersions(
+            [o for o in out if o.modName not in gone])
         keep = []
         for m in out:
-            missing = [n for n, _c in m.modRequirements if n in gone]
-            if missing:
+            missing = [n for n in Requires.names(m.modRequirement,
+                                                 positiveOnly=True)
+                       if n in gone]
+            if missing and not Planner.requirementHolds(m.modRequirement,
+                                                        versions):
                 logError("'%s' requires mod '%s', which failed; skipping"
                          % (m.modName, missing[0]))
                 dependents.add(m.modName)
@@ -610,7 +694,8 @@ def _mergeDefinitions(manifests, sources):
         emitted = []
         roundFailed = set()
         contributing = [m for m in manifests if m.modName not in failed]
-        for key, contributions in Definitions.collect(contributing):
+        versions = Planner.installedVersions(contributing)
+        for key, contributions in Definitions.collect(contributing, versions):
             namespace, name = key
             relPath = Manifest.definitionFile(namespace, name)
             absPath = Paths.resolveResModsTarget(relPath)
@@ -632,8 +717,12 @@ def _mergeDefinitions(manifests, sources):
                 d = _Definition()
                 (d.namespace, d.name, d.relPath, d.absPath, d.data,
                  d.isNew) = namespace, name, relPath, absPath, data, isNew
-                d.contributors = [m.modName for m, _ in contributions
-                                  if m.modName in landed]
+                d.contributors = []
+                for m, _ in contributions:
+
+
+                    if m.modName in landed and m.modName not in d.contributors:
+                        d.contributors.append(m.modName)
                 d.contributions = contributions
                 emitted.append(d)
         if not roundFailed:
@@ -753,6 +842,7 @@ def _revertOrphanedOutputs(recordedOutputs, claimedPaths, tx):
     return reverted
 
 def _dropOrphanedCompiles(recorded, declaredPaths):
+    removed = []
     for relPath in sorted(recorded):
         if relPath in declaredPaths:
             continue
@@ -764,8 +854,10 @@ def _dropOrphanedCompiles(recorded, declaredPaths):
         except Exception as exc:
             logError('cannot remove %s: %s' % (relPath, exc))
             continue
+        removed.append(relPath)
         logInfo("removed %s; '%s' no longer builds it"
                 % (relPath, recorded[relPath][1]))
+    return removed
 
 def _collectTargetFiles(contributors):
     seen = []
@@ -922,6 +1014,11 @@ def _loadRegistry():
         h = child.get('hash')
         if path and h:
             linted[path] = h
+    restart = {}
+    for child in root.findall('restart'):
+        path = child.get('path')
+        if path:
+            restart[path] = child.get('hash') or ''
     return {
         'buildId': root.get('buildId'),
         'mods': mods,
@@ -929,10 +1026,11 @@ def _loadRegistry():
         'compiled': compiled,
         'stamps': stamps,
         'linted': linted,
+        'restart': restart,
     }
 
 def _saveRegistry(buildId, successfulManifests, outputHashes, compiled,
-                  stamps, linted=None):
+                  stamps, linted=None, restart=None):
     root = _u2.Element('installed')
     root.set('buildId', buildId)
     root.set('installer', _installerVersion or '')
@@ -965,6 +1063,12 @@ def _saveRegistry(buildId, successfulManifests, outputHashes, compiled,
         e = _u2.SubElement(root, 'linted')
         e.set('path', path)
         e.set('hash', linted[path])
+
+    for path in sorted(restart or {}):
+        e = _u2.SubElement(root, 'restart')
+        e.set('path', path)
+        if restart[path]:
+            e.set('hash', restart[path])
     data = _u2.tostring(root)
     Paths.writeBytes(Paths.installedRegistryPath(), data)
 
@@ -972,7 +1076,7 @@ _installerVersion = None
 _COMPILER_STAMP = '1'
 
 def _finalize(_oldRegistry, successfulManifests, stats, installerVersion,
-              outputHashes=None, compiled=None, linted=None):
+              outputHashes=None, compiled=None, linted=None, restart=None):
     global _installerVersion
     _installerVersion = installerVersion
 
@@ -980,7 +1084,7 @@ def _finalize(_oldRegistry, successfulManifests, stats, installerVersion,
                              + list((compiled or {}).keys()))
     try:
         _saveRegistry(Paths.gameBuildId(), successfulManifests, outputHashes,
-                      compiled, stamps, linted)
+                      compiled, stamps, linted, restart)
     except Exception as exc:
         logError('failed to write installed.xml: %s' % exc)
     Resources.shutdown()
